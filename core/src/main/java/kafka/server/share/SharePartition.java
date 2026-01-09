@@ -56,6 +56,7 @@ import org.apache.kafka.server.share.fetch.acquire.AcquireStrategy;
 import org.apache.kafka.server.share.fetch.acquire.BatchCreationContext;
 import org.apache.kafka.server.share.fetch.acquire.BatchCreationResult;
 import org.apache.kafka.server.share.fetch.acquire.BatchOptimizedStrategy;
+import org.apache.kafka.server.share.fetch.acquire.PersisterGapTracker;
 import org.apache.kafka.server.share.fetch.acquire.RecordLimitStrategy;
 import org.apache.kafka.server.share.metrics.SharePartitionMetrics;
 import org.apache.kafka.server.share.persister.GroupTopicPartitionData;
@@ -288,10 +289,9 @@ public class SharePartition {
     private long endOffset;
 
     /**
-     * The persister read result gap window tracks if there are any gaps in the in-flight batch during
-     * initial read of the share partition state from the persister.
+     * Gap tracker to manage gaps from the initial read of the share partition state from the persister.
      */
-    private GapWindow persisterReadResultGapWindow;
+    private PersisterGapTracker persisterGapTracker;
 
     /**
      * We maintain the latest fetch offset and its metadata to estimate the minBytes requirement more efficiently.
@@ -527,7 +527,7 @@ public class SharePartition {
                     endOffset = cachedState.lastEntry().getValue().lastOffset();
                     // gapWindow is not required, if there are no gaps in the read state response
                     if (gapStartOffset != -1) {
-                        persisterReadResultGapWindow = new GapWindow(endOffset, gapStartOffset);
+                        persisterGapTracker = new PersisterGapTracker(endOffset, gapStartOffset);
                     }
                     // In case the persister read state RPC result contains no AVAILABLE records, we can update cached state
                     // and start/end offsets.
@@ -613,7 +613,7 @@ public class SharePartition {
             }
 
             long nextFetchOffset = -1;
-            long gapStartOffset = isPersisterReadGapWindowActive() ? persisterReadResultGapWindow.gapStartOffset() : -1;
+            long gapStartOffset = isPersisterReadGapWindowActive() ? persisterGapTracker.gapStartOffset() : -1;
             for (Map.Entry<Long, InFlightBatch> entry : cachedState.entrySet()) {
                 // Check if there exists any gap in the in-flight batch which needs to be fetched. If
                 // gapWindow's endOffset is equal to the share partition's endOffset, then
@@ -832,9 +832,12 @@ public class SharePartition {
             List<AcquiredRecords> result = new ArrayList<>();
             // The acquired count is used to track the number of records acquired for the request.
             int acquiredCount = 0;
-            // This tracks whether there is a gap between the subMap entries. If a gap is found, we will acquire
-            // the corresponding offsets in a separate batch.
-            long maybeGapStartOffset = baseOffset;
+            // Initialize gap tracker for this acquisition if active
+            PersisterGapTracker activeGapTracker = getActiveGapTracker();
+            if (activeGapTracker != null) {
+                activeGapTracker.startTracking(baseOffset);
+            }
+
             // The fetched records are already part of the in-flight records. The records might
             // be available for re-delivery hence try acquiring same. The request batches could
             // be an exact match, subset or span over multiple already fetched batches.
@@ -845,31 +848,21 @@ public class SharePartition {
                 }
 
                 InFlightBatch inFlightBatch = entry.getValue();
-                // If the gapWindow window is active, we need to treat the gaps in between the window as
+
+                // If the gap tracker is active, we need to treat the gaps in between the window as
                 // acquirable. Once the window is inactive (when we have acquired all the gaps inside the window),
                 // the remaining gaps are natural (data does not exist at those offsets) and we need not acquire them.
-                if (isPersisterReadGapWindowActive()) {
-                    // If nextBatchStartOffset is less than the key of the entry, this means the fetch happened for a gap in the cachedState.
-                    // Thus, a new batch needs to be acquired for the gap.
-                    if (maybeGapStartOffset < entry.getKey()) {
-                        // It's safe to use entry.getKey() - 1 as the last offset to acquire for the
-                        // gap as the sub map should contain either the next batch or this line should
-                        // not have been executed i.e. say there is a gap from 10-20 and cache contains
-                        // [0-9, 21-30], when fetch returns single/multiple batches from 0-15, then
-                        // first sub map entry has no gap and there exists only 1 entry in sub map.
-                        // Hence, for next batch the following code will not be executed and records
-                        // from 10-15 will be acquired later in the code. In other case, when
-                        // fetch returns batches from 0-25, then the sub map will have 2 entries and
-                        // gap will be computed correctly.
-                        int numRecordsRemaining = maxRecordsToAcquire - acquiredCount;
-                        ShareAcquiredRecords shareAcquiredRecords = acquireNewBatchRecords(memberId, fetchPartitionData.records.batches(), strategy,
-                            maybeGapStartOffset, entry.getKey() - 1, batchSize, numRecordsRemaining);
-                        result.addAll(shareAcquiredRecords.acquiredRecords());
-                        acquiredCount += shareAcquiredRecords.count();
-                    }
-                    // Set nextBatchStartOffset as the last offset of the current in-flight batch + 1.
+                if (activeGapTracker != null) {
+                    int gapAcquiredCount = acquireGapIfPresent(
+                        activeGapTracker, entry.getKey(), memberId,
+                        fetchPartitionData.records.batches(), strategy,
+                        batchSize, maxRecordsToAcquire - acquiredCount, result
+                    );
+                    acquiredCount += gapAcquiredCount;
+                    // Set current tracking offset as the last offset of the current in-flight batch + 1.
                     // Hence, after the loop iteration the next gap can be considered.
-                    maybeGapStartOffset = inFlightBatch.lastOffset() + 1;
+                    activeGapTracker.advancePast(inFlightBatch.lastOffset());
+
                     // If the acquired count is equal to the max fetch records then break the loop.
                     if (acquiredCount >= maxRecordsToAcquire) {
                         break;
@@ -1368,6 +1361,55 @@ public class SharePartition {
     }
 
     /**
+     * Returns the gap tracker if it's currently active, null otherwise.
+     * The gap tracker is active when the share partition's endOffset matches
+     * the gap window's endOffset.
+     *
+     * @return The active PersisterGapTracker or null.
+     */
+    private PersisterGapTracker getActiveGapTracker() {
+        if (persisterGapTracker != null && persisterGapTracker.isActive(endOffset)) {
+            return persisterGapTracker;
+        }
+        return null;
+    }
+
+    /**
+     * Acquires records for a gap before the specified batch offset if one exists.
+     *
+     * @param gapTracker        The active gap tracker.
+     * @param batchFirstOffset  The first offset of the next cached batch.
+     * @param memberId          The member ID acquiring the records.
+     * @param batches           The record batches from the fetch.
+     * @param strategy          The acquire strategy to use.
+     * @param batchSize         The batch size for splitting.
+     * @param maxRecords        The maximum records to acquire.
+     * @param result            The list to add acquired records to.
+     * @return The number of records acquired from the gap.
+     */
+    private int acquireGapIfPresent(
+        PersisterGapTracker gapTracker,
+        long batchFirstOffset,
+        String memberId,
+        Iterable<? extends RecordBatch> batches,
+        AcquireStrategy strategy,
+        int batchSize,
+        int maxRecords,
+        List<AcquiredRecords> result
+    ) {
+        Optional<PersisterGapTracker.GapRange> gapOpt = gapTracker.findGapBefore(batchFirstOffset);
+        if (gapOpt.isEmpty()) {
+            return 0;
+        }
+
+        PersisterGapTracker.GapRange gap = gapOpt.get();
+        ShareAcquiredRecords gapRecords = acquireNewBatchRecords(memberId, batches, strategy, gap.firstOffset(),
+            gap.lastOffset(), batchSize, maxRecords);
+        result.addAll(gapRecords.acquiredRecords());
+        return gapRecords.count();
+    }
+
+    /**
      * The method archive the records in a given state in the map that are before the end offset.
      *
      * @param startOffset The offset from which the records should be archived.
@@ -1651,17 +1693,16 @@ public class SharePartition {
     private void maybeUpdatePersisterGapWindowStartOffset(long offset) {
         lock.writeLock().lock();
         try {
-            if (persisterReadResultGapWindow != null) {
+            if (persisterGapTracker != null) {
+                // Update gap tracker and clear if no longer active.
                 // When last cached batch for persister's read gap window is acquired, then endOffset is
                 // same as the gapWindow's endOffset, but the gap offset to update in the method call
                 // is endOffset + 1. Hence, do not update the gap start offset if the request offset
                 // is ahead of the endOffset.
-                if (persisterReadResultGapWindow.endOffset() == endOffset && offset <= persisterReadResultGapWindow.endOffset()) {
-                    persisterReadResultGapWindow.gapStartOffset(offset);
-                } else {
+                if (!persisterGapTracker.maybeUpdateGapStart(offset, endOffset)) {
                     // The persister's read gap window is not valid anymore as the end offset has moved
-                    // beyond the read gap window's endOffset. Hence, set the gap window to null.
-                    persisterReadResultGapWindow = null;
+                    // beyond the read gap window's endOffset. Hence, set the gap tracker to null.
+                    persisterGapTracker = null;
                 }
             }
         } finally {
@@ -2564,7 +2605,7 @@ public class SharePartition {
                     // of next cachedState batch (next cachedState batch is 31 to 40). There is an acquirable gap in between (21 to 30)
                     // and The startOffset should be at 21. Hence, we set startOffset to the minimum of gapWindow.gapStartOffset
                     // and higher key of lastOffsetAcknowledged
-                    startOffset = Math.min(persisterReadResultGapWindow.gapStartOffset(), startOffset);
+                    startOffset = Math.min(persisterGapTracker.gapStartOffset(), startOffset);
                 }
                 lastKeyToRemove = entry.getKey();
             } else {
@@ -2633,7 +2674,7 @@ public class SharePartition {
     }
 
     private boolean isPersisterReadGapWindowActive() {
-        return persisterReadResultGapWindow != null && persisterReadResultGapWindow.endOffset() == endOffset;
+        return persisterGapTracker != null && persisterGapTracker.isActive(endOffset);
     }
 
     /**
@@ -2667,7 +2708,7 @@ public class SharePartition {
             for (NavigableMap.Entry<Long, InFlightBatch> entry : cachedState.entrySet()) {
                 InFlightBatch inFlightBatch = entry.getValue();
 
-                if (isPersisterReadGapWindowActive() && inFlightBatch.lastOffset() >= persisterReadResultGapWindow.gapStartOffset()) {
+                if (isPersisterReadGapWindowActive() && inFlightBatch.lastOffset() >= persisterGapTracker.gapStartOffset()) {
                     return new OffsetAndMetadata(lastOffsetAcknowledged, numTerminalRecords);
                 }
 
@@ -3259,8 +3300,8 @@ public class SharePartition {
     }
 
     // Visible for testing
-    GapWindow persisterReadResultGapWindow() {
-        return persisterReadResultGapWindow;
+    PersisterGapTracker persisterGapTracker() {
+        return persisterGapTracker;
     }
 
     // Visible for testing.
@@ -3271,35 +3312,6 @@ public class SharePartition {
     // Visible for testing.
     int deliveryCompleteCount() {
         return deliveryCompleteCount.get();
-    }
-
-    /**
-     * The GapWindow class is used to record the gap start and end offset of the probable gaps
-     * of available records which are neither known to Persister nor to SharePartition. Share Partition
-     * will use this information to determine the next fetch offset and should try to fetch the records
-     * in the gap.
-     */
-    // Visible for Testing
-    static class GapWindow {
-        private final long endOffset;
-        private long gapStartOffset;
-
-        GapWindow(long endOffset, long gapStartOffset) {
-            this.endOffset = endOffset;
-            this.gapStartOffset = gapStartOffset;
-        }
-
-        long endOffset() {
-            return endOffset;
-        }
-
-        long gapStartOffset() {
-            return gapStartOffset;
-        }
-
-        void gapStartOffset(long gapStartOffset) {
-            this.gapStartOffset = gapStartOffset;
-        }
     }
 
     /**

@@ -17,7 +17,6 @@
 package kafka.server.share;
 
 import kafka.server.ReplicaManager;
-import kafka.server.share.SharePartition.GapWindow;
 import kafka.server.share.SharePartition.SharePartitionState;
 import kafka.server.share.SharePartitionManager.SharePartitionListener;
 
@@ -61,6 +60,7 @@ import org.apache.kafka.server.share.fetch.InFlightBatch;
 import org.apache.kafka.server.share.fetch.InFlightState;
 import org.apache.kafka.server.share.fetch.RecordState;
 import org.apache.kafka.server.share.fetch.ShareAcquiredRecords;
+import org.apache.kafka.server.share.fetch.acquire.PersisterGapTracker;
 import org.apache.kafka.server.share.metrics.SharePartitionMetrics;
 import org.apache.kafka.server.share.persister.NoOpStatePersister;
 import org.apache.kafka.server.share.persister.PartitionFactory;
@@ -977,11 +977,11 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.cachedState().get(21L).batchDeliveryCount());
         assertNull(sharePartition.cachedState().get(21L).offsetState());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        assertEquals(10, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(30, persisterReadResultGapWindow.endOffset());
+        assertEquals(10, persisterGapTracker.gapStartOffset());
+        assertEquals(30, persisterGapTracker.endOffset());
 
         // deliveryCompleteCount is incremented by the number of ACKNOWLEDGED and ARCHIVED records in readState result.
         assertEquals(16, sharePartition.deliveryCompleteCount());
@@ -1025,11 +1025,11 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.cachedState().get(30L).batchDeliveryCount());
         assertNull(sharePartition.cachedState().get(30L).offsetState());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        assertEquals(10, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        assertEquals(10, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
 
         // deliveryCompleteCount is incremented by the number of ACKNOWLEDGED and ARCHIVED records in readState result.
         assertEquals(17, sharePartition.deliveryCompleteCount());
@@ -1069,11 +1069,11 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.cachedState().get(30L).batchDeliveryCount());
         assertNull(sharePartition.cachedState().get(30L).offsetState());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        assertEquals(21, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        assertEquals(21, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
         assertEquals(11, sharePartition.deliveryCompleteCount());
     }
 
@@ -1102,10 +1102,10 @@ public class SharePartitionTest {
         assertEquals(31, sharePartition.nextFetchOffset());
         assertEquals(0, sharePartition.deliveryCompleteCount());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
 
-        // Since there are no gaps present in the readState response, persisterReadResultGapWindow should be null
-        assertNull(persisterReadResultGapWindow);
+        // Since there are no gaps present in the readState response, persisterGapTracker should be null
+        assertNull(persisterGapTracker);
     }
 
     @Test
@@ -1138,9 +1138,9 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(15L).batchState());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(10L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
-        assertEquals(30L, sharePartition.persisterReadResultGapWindow().endOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(10L, sharePartition.persisterGapTracker().gapStartOffset());
+        assertEquals(30L, sharePartition.persisterGapTracker().endOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Create a single batch record that covers the entire range from 10 to 30 of initial read gap.
@@ -1168,8 +1168,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(15L).batchState());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(15L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(15L, sharePartition.persisterGapTracker().gapStartOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Send the same batch again to acquire the next set of records.
@@ -1204,8 +1204,8 @@ public class SharePartitionTest {
         assertEquals(1, sharePartition.cachedState().get(23L).batchDeliveryCount());
         assertEquals(RecordState.ACQUIRED, sharePartition.cachedState().get(26L).batchState());
         assertEquals(30L, sharePartition.endOffset());
-        // As all the gaps are now filled, the persisterReadResultGapWindow should be null.
-        assertNull(sharePartition.persisterReadResultGapWindow());
+        // As all the gaps are now filled, the persisterGapTracker should be null.
+        assertNull(sharePartition.persisterGapTracker());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Now initial read gap is filled, so the complete batch can be acquired despite max fetch records being 1.
@@ -1261,9 +1261,9 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(15L).batchState());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(10L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
-        assertEquals(30L, sharePartition.persisterReadResultGapWindow().endOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(10L, sharePartition.persisterGapTracker().gapStartOffset());
+        assertEquals(30L, sharePartition.persisterGapTracker().endOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Create a single batch record that covers the entire range from 10 to 30 of initial read gap.
@@ -1307,8 +1307,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.ACQUIRED, sharePartition.cachedState().get(26L).batchState());
         assertEquals(RecordState.ACQUIRED, sharePartition.cachedState().get(31L).batchState());
         assertEquals(49L, sharePartition.endOffset());
-        // As all the gaps are now filled, the persisterReadResultGapWindow should be null.
-        assertNull(sharePartition.persisterReadResultGapWindow());
+        // As all the gaps are now filled, the persisterGapTracker should be null.
+        assertNull(sharePartition.persisterGapTracker());
         assertEquals(3, sharePartition.deliveryCompleteCount());
     }
 
@@ -1342,9 +1342,9 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(15L).batchState());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(10L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
-        assertEquals(30L, sharePartition.persisterReadResultGapWindow().endOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(10L, sharePartition.persisterGapTracker().gapStartOffset());
+        assertEquals(30L, sharePartition.persisterGapTracker().endOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Create a single batch record that ends in between the cached batch and the fetch offset is
@@ -1389,8 +1389,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).offsetState().get(29L).state());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).offsetState().get(30L).state());
         assertEquals(30L, sharePartition.endOffset());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(28L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(28L, sharePartition.persisterGapTracker().gapStartOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
     }
 
@@ -1424,9 +1424,9 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(15L).batchState());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(10L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
-        assertEquals(30L, sharePartition.persisterReadResultGapWindow().endOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(10L, sharePartition.persisterGapTracker().gapStartOffset());
+        assertEquals(30L, sharePartition.persisterGapTracker().endOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Create a single batch record where first offset is prior startOffset.
@@ -1460,8 +1460,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
         assertEquals(30L, sharePartition.endOffset());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(20L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(20L, sharePartition.persisterGapTracker().gapStartOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
     }
 
@@ -1495,9 +1495,9 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(15L).batchState());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(5L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
-        assertEquals(30L, sharePartition.persisterReadResultGapWindow().endOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(5L, sharePartition.persisterGapTracker().gapStartOffset());
+        assertEquals(30L, sharePartition.persisterGapTracker().endOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Create multiple batch records that covers the entire range from 5 to 30 of initial read gap.
@@ -1533,8 +1533,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(15L).batchState());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(7L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(7L, sharePartition.persisterGapTracker().gapStartOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Remove first batch from the records as the fetch offset has moved forward to 7 offset.
@@ -1562,8 +1562,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
         assertEquals(30L, sharePartition.endOffset());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(12L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(12L, sharePartition.persisterGapTracker().gapStartOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Remove the next 2 batches from the records as the fetch offset has moved forward to 12 offset.
@@ -1601,8 +1601,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.ACQUIRED, sharePartition.cachedState().get(23L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
         assertEquals(30L, sharePartition.endOffset());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(26L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(26L, sharePartition.persisterGapTracker().gapStartOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Remove the next 2 batches from the records as the fetch offset has moved forward to 26 offset.
@@ -1632,8 +1632,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.ACQUIRED, sharePartition.cachedState().get(31L).batchState());
         assertEquals(RecordState.ACQUIRED, sharePartition.cachedState().get(26L).batchState());
         assertEquals(49L, sharePartition.endOffset());
-        // As all the gaps are now filled, the persisterReadResultGapWindow should be null.
-        assertNull(sharePartition.persisterReadResultGapWindow());
+        // As all the gaps are now filled, the persisterGapTracker should be null.
+        assertNull(sharePartition.persisterGapTracker());
         assertEquals(3, sharePartition.deliveryCompleteCount());
     }
 
@@ -1667,9 +1667,9 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(15L).batchState());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(5L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
-        assertEquals(30L, sharePartition.persisterReadResultGapWindow().endOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(5L, sharePartition.persisterGapTracker().gapStartOffset());
+        assertEquals(30L, sharePartition.persisterGapTracker().endOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Create multiple batch records that ends in between the cached batch and the fetch offset is
@@ -1721,8 +1721,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).offsetState().get(29L).state());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).offsetState().get(30L).state());
         assertEquals(30L, sharePartition.endOffset());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(28L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(28L, sharePartition.persisterGapTracker().gapStartOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
     }
 
@@ -1756,9 +1756,9 @@ public class SharePartitionTest {
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(15L).batchState());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(10L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
-        assertEquals(30L, sharePartition.persisterReadResultGapWindow().endOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(10L, sharePartition.persisterGapTracker().gapStartOffset());
+        assertEquals(30L, sharePartition.persisterGapTracker().endOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
 
         // Create multiple batch records where multiple batches base offsets are prior startOffset.
@@ -1798,8 +1798,8 @@ public class SharePartitionTest {
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(20L).batchState());
         assertEquals(RecordState.AVAILABLE, sharePartition.cachedState().get(26L).batchState());
         assertEquals(30L, sharePartition.endOffset());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(20L, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(20L, sharePartition.persisterGapTracker().gapStartOffset());
         assertEquals(3, sharePartition.deliveryCompleteCount());
     }
 
@@ -2597,8 +2597,8 @@ public class SharePartitionTest {
         assertEquals(20, sharePartition.cachedState().get(15L).lastOffset());
         assertEquals(RecordState.ARCHIVED, sharePartition.cachedState().get(15L).batchState());
         // As there is a gap between 5-14 offsets, gap window should be created.
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(5, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(5, sharePartition.persisterGapTracker().gapStartOffset());
 
         // Acquire offsets starting prior to start offset and going beyond it. Only offsets from 5-9 should
         // be acquired.
@@ -2618,8 +2618,8 @@ public class SharePartitionTest {
         assertEquals(5L, sharePartition.startOffset());
         assertEquals(5, sharePartition.cachedState().get(5L).firstOffset());
         assertEquals(9, sharePartition.cachedState().get(5L).lastOffset());
-        assertNotNull(sharePartition.persisterReadResultGapWindow());
-        assertEquals(10, sharePartition.persisterReadResultGapWindow().gapStartOffset());
+        assertNotNull(sharePartition.persisterGapTracker());
+        assertEquals(10, sharePartition.persisterGapTracker().gapStartOffset());
     }
 
     @Test
@@ -3359,12 +3359,12 @@ public class SharePartitionTest {
         assertEquals(16, sharePartition.nextFetchOffset());
         assertEquals(20, sharePartition.deliveryCompleteCount());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        // After records are acquired, the persisterReadResultGapWindow should be updated
-        assertEquals(16, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        // After records are acquired, the persisterGapTracker should be updated
+        assertEquals(16, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -3400,12 +3400,12 @@ public class SharePartitionTest {
         assertEquals(41, sharePartition.nextFetchOffset());
         assertEquals(20, sharePartition.deliveryCompleteCount());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        // After records are acquired, the persisterReadResultGapWindow should be updated
-        assertEquals(21, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        // After records are acquired, the persisterGapTracker should be updated
+        assertEquals(21, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -3451,12 +3451,12 @@ public class SharePartitionTest {
         assertEquals(26, sharePartition.nextFetchOffset());
         assertEquals(10, sharePartition.deliveryCompleteCount());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        // After records are acquired, the persisterReadResultGapWindow should be updated
-        assertEquals(26, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        // After records are acquired, the persisterGapTracker should be updated
+        assertEquals(26, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -3497,12 +3497,12 @@ public class SharePartitionTest {
         assertEquals(26, sharePartition.nextFetchOffset());
         assertEquals(10, sharePartition.deliveryCompleteCount());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        // After records are acquired, the persisterReadResultGapWindow should be updated
-        assertEquals(26, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        // After records are acquired, the persisterGapTracker should be updated
+        assertEquals(26, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -3551,14 +3551,14 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(86, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
         assertEquals(20, sharePartition.deliveryCompleteCount());
 
-        // After records are acquired, the persisterReadResultGapWindow should be updated
-        assertEquals(86, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(90, persisterReadResultGapWindow.endOffset());
+        // After records are acquired, the persisterGapTracker should be updated
+        assertEquals(86, persisterGapTracker.gapStartOffset());
+        assertEquals(90, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -3599,12 +3599,12 @@ public class SharePartitionTest {
         assertEquals(31, sharePartition.nextFetchOffset());
         assertEquals(20, sharePartition.deliveryCompleteCount());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        // After records are acquired, the persisterReadResultGapWindow should be updated
-        assertEquals(31, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(70, persisterReadResultGapWindow.endOffset());
+        // After records are acquired, the persisterGapTracker should be updated
+        assertEquals(31, persisterGapTracker.gapStartOffset());
+        assertEquals(70, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -3652,12 +3652,12 @@ public class SharePartitionTest {
         assertEquals(76, sharePartition.nextFetchOffset());
         assertEquals(20, sharePartition.deliveryCompleteCount());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        // After records are acquired, the persisterReadResultGapWindow should be updated
-        assertEquals(76, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(90, persisterReadResultGapWindow.endOffset());
+        // After records are acquired, the persisterGapTracker should be updated
+        assertEquals(76, persisterGapTracker.gapStartOffset());
+        assertEquals(90, persisterGapTracker.endOffset());
     }
 
 
@@ -3710,11 +3710,11 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(27, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        assertEquals(27, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        assertEquals(27, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -3761,11 +3761,11 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(21, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        assertEquals(21, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        assertEquals(21, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -3812,11 +3812,11 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(21, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        assertEquals(21, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        assertEquals(21, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -3865,8 +3865,8 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(51, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNull(persisterGapTracker);
     }
 
     @Test
@@ -3910,8 +3910,8 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(61, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNull(persisterGapTracker);
     }
 
     @Test
@@ -3957,8 +3957,8 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(61, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNull(persisterGapTracker);
     }
 
     @Test
@@ -4007,8 +4007,8 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(61, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNull(persisterGapTracker);
     }
 
     @Test
@@ -4049,11 +4049,11 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(41, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        assertEquals(31, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        assertEquals(31, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
 
         // Fetching from the  nextFetchOffset so that endOffset moves ahead
         records = memoryRecords(41, 15);
@@ -4069,9 +4069,9 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(56, sharePartition.nextFetchOffset());
 
-        // Since the endOffset is now moved ahead, the persisterReadResultGapWindow should be empty
-        persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNull(persisterReadResultGapWindow);
+        // Since the endOffset is now moved ahead, the persisterGapTracker should be empty
+        persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNull(persisterGapTracker);
     }
 
     @Test
@@ -7927,11 +7927,11 @@ public class SharePartitionTest {
         assertEquals(21, sharePartition.nextFetchOffset());
         assertEquals(10, sharePartition.deliveryCompleteCount());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        assertEquals(21, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        assertEquals(21, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
     }
 
     @Test
@@ -8507,16 +8507,16 @@ public class SharePartitionTest {
 
         sharePartition.maybeInitialize();
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
 
-        // Since there is a gap in the beginning, the persisterReadResultGapWindow window is same as the cachedState
-        assertEquals(11, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(40, persisterReadResultGapWindow.endOffset());
+        // Since there is a gap in the beginning, the persisterGapTracker window is same as the cachedState
+        assertEquals(11, persisterGapTracker.gapStartOffset());
+        assertEquals(40, persisterGapTracker.endOffset());
 
         SharePartition.OffsetAndMetadata result = sharePartition.findLastOffsetAcknowledgedAndMetadata();
 
-        // Since the persisterReadResultGapWindow window begins at startOffset, we cannot count any of the offsets as acknowledged.
+        // Since the persisterGapTracker window begins at startOffset, we cannot count any of the offsets as acknowledged.
         // Thus, lastAckedOffset should be -1 and numTerminalRecords should be 0.
         assertEquals(-1, result.lastAcknowledgedOffset());
         assertEquals(0, result.numTerminalRecords());
@@ -11098,8 +11098,8 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(56, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNull(persisterGapTracker);
 
         TestUtils.waitForCondition(() -> yammerMetricValue(SharePartitionMetrics.IN_FLIGHT_BATCH_COUNT).intValue() == 5,
             "In-flight batch count should be 5.");
@@ -11162,11 +11162,11 @@ public class SharePartitionTest {
         assertEquals(3, sharePartition.stateEpoch());
         assertEquals(36, sharePartition.nextFetchOffset());
 
-        GapWindow persisterReadResultGapWindow = sharePartition.persisterReadResultGapWindow();
-        assertNotNull(persisterReadResultGapWindow);
+        PersisterGapTracker persisterGapTracker = sharePartition.persisterGapTracker();
+        assertNotNull(persisterGapTracker);
         // Gap still exists from 36 to 40
-        assertEquals(36L, persisterReadResultGapWindow.gapStartOffset());
-        assertEquals(50L, persisterReadResultGapWindow.endOffset());
+        assertEquals(36L, persisterGapTracker.gapStartOffset());
+        assertEquals(50L, persisterGapTracker.endOffset());
 
         TestUtils.waitForCondition(() -> yammerMetricValue(SharePartitionMetrics.IN_FLIGHT_BATCH_COUNT).intValue() == 4,
             "In-flight batch count should be 4.");
