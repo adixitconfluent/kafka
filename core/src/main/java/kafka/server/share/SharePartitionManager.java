@@ -147,6 +147,13 @@ public class SharePartitionManager implements AutoCloseable {
      * The max delivery count is the maximum number of times a message can be delivered before it is considered to be archived.
      */
     private final int maxDeliveryCount;
+
+    /**
+     * The default release delay is the time in milliseconds for which a record stays unavailable for redelivery
+     * after it is released, its acquisition lock times out, or the consumer holding it disconnects.
+     * This default value can be overridden by a group-specific configuration.
+     */
+    private final int defaultReleaseDelayMs;
     /**
      * The max wait time for a share fetch request having remote storage fetch.
      */
@@ -177,6 +184,11 @@ public class SharePartitionManager implements AutoCloseable {
      */
     private final ShareGroupDLQManager shareGroupDLQManager;
 
+    /**
+     * Supplier indicating whether the redelivery delay support is enabled.
+     */
+    private final Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier;
+
     @SuppressWarnings("ParameterNumber")
     public SharePartitionManager(
         ReplicaManager replicaManager,
@@ -188,13 +200,15 @@ public class SharePartitionManager implements AutoCloseable {
         int defaultRecordLockDurationMs,
         int maxDeliveryCount,
         int maxInFlightRecords,
+        int defaultReleaseDelayMs,
         long remoteFetchMaxWaitMs,
         Persister persister,
         ShareGroupConfigProvider configProvider,
         ShareGroupMetrics shareGroupMetrics,
         BrokerTopicStats brokerTopicStats,
         Supplier<Boolean> shareGroupDlqEnableSupplier,
-        ShareGroupDLQManager shareGroupDLQManager
+        ShareGroupDLQManager shareGroupDLQManager,
+        Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
     ) {
         this(replicaManager,
             logReader,
@@ -206,13 +220,15 @@ public class SharePartitionManager implements AutoCloseable {
             defaultRecordLockDurationMs,
             maxDeliveryCount,
             maxInFlightRecords,
+            defaultReleaseDelayMs,
             remoteFetchMaxWaitMs,
             persister,
             configProvider,
             shareGroupMetrics,
             brokerTopicStats,
             shareGroupDlqEnableSupplier,
-            shareGroupDLQManager
+            shareGroupDLQManager,
+            shareGroupRedeliveryDelayEnableSupplier
         );
     }
 
@@ -228,13 +244,15 @@ public class SharePartitionManager implements AutoCloseable {
         int defaultRecordLockDurationMs,
         int maxDeliveryCount,
         int maxInFlightRecords,
+        int defaultReleaseDelayMs,
         long remoteFetchMaxWaitMs,
         Persister persister,
         ShareGroupConfigProvider configProvider,
         ShareGroupMetrics shareGroupMetrics,
         BrokerTopicStats brokerTopicStats,
         Supplier<Boolean> shareGroupDlqEnableSupplier,
-        ShareGroupDLQManager shareGroupDLQManager
+        ShareGroupDLQManager shareGroupDLQManager,
+        Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
     ) {
         this(replicaManager,
             logReader,
@@ -248,13 +266,15 @@ public class SharePartitionManager implements AutoCloseable {
                 new SystemTimer("share-group-lock-timeout")),
             maxDeliveryCount,
             maxInFlightRecords,
+            defaultReleaseDelayMs,
             remoteFetchMaxWaitMs,
             persister,
             configProvider,
             shareGroupMetrics,
             brokerTopicStats,
             shareGroupDlqEnableSupplier,
-            shareGroupDLQManager
+            shareGroupDLQManager,
+            shareGroupRedeliveryDelayEnableSupplier
         );
     }
 
@@ -272,13 +292,15 @@ public class SharePartitionManager implements AutoCloseable {
             Timer timer,
             int maxDeliveryCount,
             int maxInFlightRecords,
+            int defaultReleaseDelayMs,
             long remoteFetchMaxWaitMs,
             Persister persister,
             ShareGroupConfigProvider configProvider,
             ShareGroupMetrics shareGroupMetrics,
             BrokerTopicStats brokerTopicStats,
             Supplier<Boolean> shareGroupDlqEnableSupplier,
-            ShareGroupDLQManager shareGroupDLQManager
+            ShareGroupDLQManager shareGroupDLQManager,
+            Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
     ) {
         this.replicaManager = replicaManager;
         this.logReader = logReader;
@@ -291,6 +313,7 @@ public class SharePartitionManager implements AutoCloseable {
         this.timer = timer;
         this.maxDeliveryCount = maxDeliveryCount;
         this.maxInFlightRecords = maxInFlightRecords;
+        this.defaultReleaseDelayMs = defaultReleaseDelayMs;
         this.remoteFetchMaxWaitMs = remoteFetchMaxWaitMs;
         this.persister = persister;
         this.configProvider = configProvider;
@@ -299,6 +322,7 @@ public class SharePartitionManager implements AutoCloseable {
         this.cache.registerShareGroupListener(new ShareGroupListenerImpl());
         this.shareGroupDlqEnableSupplier = shareGroupDlqEnableSupplier;
         this.shareGroupDLQManager = shareGroupDLQManager;
+        this.shareGroupRedeliveryDelayEnableSupplier = shareGroupRedeliveryDelayEnableSupplier;
     }
 
     /**
@@ -405,8 +429,9 @@ public class SharePartitionManager implements AutoCloseable {
 
     /**
      * The release session method is used to release the session for the memberId of respective group.
-     * The method post removing session also releases acquired records for the respective member.
-     * The method returns a future that will be completed with the release response.
+     * The method post removing session also releases acquired records for the respective member, which
+     * are available for redelivery immediately. The method returns a future that will be completed with
+     * the release response.
      *
      * @param groupId The group id, this is used to identify the share group.
      * @param memberId The member id is used to identify the client.
@@ -417,7 +442,28 @@ public class SharePartitionManager implements AutoCloseable {
         String groupId,
         String memberId
     ) {
-        log.trace("Release session request for groupId: {}, memberId: {}", groupId, memberId);
+        return releaseSession(groupId, memberId, false);
+    }
+
+    /**
+     * The release session method is used to release the session for the memberId of respective group.
+     * The method post removing session also releases acquired records for the respective member.
+     * The method returns a future that will be completed with the release response.
+     *
+     * @param groupId The group id, this is used to identify the share group.
+     * @param memberId The member id is used to identify the client.
+     * @param applyRedeliveryDelay Whether the redelivery delay applies to the released records. The delay
+     *                             applies when the session is released because the client disconnected.
+     *
+     * @return A future that will be completed with the release response.
+     */
+    public CompletableFuture<Map<TopicIdPartition, ShareAcknowledgeResponseData.PartitionData>> releaseSession(
+        String groupId,
+        String memberId,
+        boolean applyRedeliveryDelay
+    ) {
+        log.trace("Release session request for groupId: {}, memberId: {}, applyRedeliveryDelay: {}",
+            groupId, memberId, applyRedeliveryDelay);
         List<TopicIdPartition> topicIdPartitions = cachedTopicIdPartitionsInShareSession(
             groupId, memberId);
         // Remove the share session from the cache.
@@ -443,7 +489,7 @@ public class SharePartitionManager implements AutoCloseable {
                 futuresMap.put(topicIdPartition, CompletableFuture.completedFuture(Errors.UNKNOWN_TOPIC_OR_PARTITION.exception()));
             } else {
                 CompletableFuture<Throwable> future = new CompletableFuture<>();
-                sharePartition.releaseAcquiredRecords(memberId).whenComplete((result, throwable) -> {
+                sharePartition.releaseAcquiredRecords(memberId, applyRedeliveryDelay).whenComplete((result, throwable) -> {
                     if (throwable != null) {
                         fencedSharePartitionHandler().accept(sharePartitionKey, throwable);
                         future.complete(throwable);
@@ -780,6 +826,7 @@ public class SharePartitionManager implements AutoCloseable {
                             maxInFlightRecords,
                             maxDeliveryCount,
                             defaultRecordLockDurationMs,
+                            defaultReleaseDelayMs,
                             timer,
                             time,
                             persister,
@@ -788,7 +835,8 @@ public class SharePartitionManager implements AutoCloseable {
                             configProvider,
                             listener,
                             shareGroupDlqEnableSupplier,
-                            shareGroupDLQManager
+                            shareGroupDLQManager,
+                            shareGroupRedeliveryDelayEnableSupplier
                     );
                 });
     }
@@ -939,7 +987,9 @@ public class SharePartitionManager implements AutoCloseable {
 
         @Override
         public void onMemberLeave(String groupId, String memberId) {
-            releaseSession(groupId, memberId);
+            // The member leaves when the client disconnects without closing its share session, for example
+            // when the client crashes, hence the redelivery delay applies to the released records.
+            releaseSession(groupId, memberId, true);
         }
 
         @Override

@@ -125,6 +125,22 @@ public class InFlightBatch {
     }
 
     /**
+     * @return the redelivery delay timer task for the batch, or null if the batch is not waiting for a redelivery delay.
+     * @throws IllegalStateException if the offset state is maintained and the batch state is not available.
+     */
+    public RedeliveryDelayTimerTask batchRedeliveryDelayTask() {
+        return inFlightState().redeliveryDelayTask();
+    }
+
+    /**
+     * Clear the redelivery delay for the batch.
+     * @throws IllegalStateException if the offset state is maintained and the batch state is not available.
+     */
+    public void clearBatchRedeliveryDelay() {
+        inFlightState().clearRedeliveryDelay();
+    }
+
+    /**
      * @return the offset state map which maintains the state of the records per offset.
      */
     public NavigableMap<Long, InFlightState> offsetState() {
@@ -229,15 +245,21 @@ public class InFlightBatch {
             // from the first offset to the last offset. Mark the batch inflightState to null as
             // the state of the records is maintained in the offset state map now.
             for (long offset = this.firstOffset; offset <= this.lastOffset; offset++) {
+                AcquisitionLockTimerTask timerTask = null;
                 if (batchState.acquisitionLockTimeoutTask() != null) {
                     // The acquisition lock timeout task is already scheduled for the batch, hence we need to schedule
                     // the acquisition lock timeout task for the offset as well.
                     long delayMs = batchState.acquisitionLockTimeoutTask().expirationMs() - time.hiResClockMs();
-                    AcquisitionLockTimerTask timerTask = acquisitionLockTimerTask(batchState.memberId(), offset, offset, delayMs);
-                    offsetState.put(offset, new InFlightState(batchState.state(), batchState.deliveryCount(), batchState.memberId(), timerTask));
+                    timerTask = acquisitionLockTimerTask(batchState.memberId(), offset, offset, delayMs);
+                }
+                InFlightState state = new InFlightState(batchState.state(), batchState.deliveryCount(), batchState.memberId(), timerTask);
+                // The redelivery delay timer task covers the complete batch, hence the offsets share the same task.
+                if (batchState.redeliveryDelayTask() != null) {
+                    state.startRedeliveryDelay(batchState.redeliveryDelayTask());
+                }
+                offsetState.put(offset, state);
+                if (timerTask != null) {
                     timer.add(timerTask);
-                } else {
-                    offsetState.put(offset, new InFlightState(batchState.state(), batchState.deliveryCount(), batchState.memberId()));
                 }
             }
             // Cancel the acquisition lock timeout task for the batch as the offset state is maintained.

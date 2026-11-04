@@ -94,6 +94,26 @@ public class ShareGroupConfigProviderTest {
     }
 
     @Test
+    void testReleaseDelayMsOrDefaultWithGroupConfig() {
+        GroupConfigManager groupConfigManager = mock(GroupConfigManager.class);
+        GroupConfig groupConfig = mock(GroupConfig.class);
+        when(groupConfig.shareReleaseDelayMs()).thenReturn(Optional.of(5000));
+        when(groupConfigManager.groupConfig("test-group")).thenReturn(Optional.of(groupConfig));
+        provider = new ShareGroupConfigProvider(groupConfigManager);
+
+        assertEquals(5000, provider.releaseDelayMsOrDefault("test-group", 0));
+    }
+
+    @Test
+    void testReleaseDelayMsOrDefaultWithoutGroupConfig() {
+        GroupConfigManager groupConfigManager = mock(GroupConfigManager.class);
+        when(groupConfigManager.groupConfig("test-group")).thenReturn(Optional.empty());
+        provider = new ShareGroupConfigProvider(groupConfigManager);
+
+        assertEquals(1000, provider.releaseDelayMsOrDefault("test-group", 1000));
+    }
+
+    @Test
     void testIsRenewAcknowledgeDisabledWithGroupConfig() {
         GroupConfigManager groupConfigManager = mock(GroupConfigManager.class);
         GroupConfig groupConfig = mock(GroupConfig.class);

@@ -36,6 +36,7 @@ import org.apache.kafka.metadata.SupportedConfigChecker;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
 import org.apache.kafka.server.common.EligibleLeaderReplicasVersion;
 import org.apache.kafka.server.common.MetadataVersion;
+import org.apache.kafka.server.common.ShareVersion;
 import org.apache.kafka.server.mutable.BoundedList;
 import org.apache.kafka.server.policy.AlterConfigPolicy;
 import org.apache.kafka.server.policy.AlterConfigPolicy.RequestMetadata;
@@ -60,6 +61,7 @@ import java.util.regex.Pattern;
 
 import static org.apache.kafka.clients.admin.AlterConfigOp.OpType.APPEND;
 import static org.apache.kafka.common.config.ConfigResource.Type.BROKER;
+import static org.apache.kafka.common.config.ConfigResource.Type.GROUP;
 import static org.apache.kafka.common.config.TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG;
 import static org.apache.kafka.common.config.TopicConfig.UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG;
 import static org.apache.kafka.common.metadata.MetadataRecordType.CONFIG_RECORD;
@@ -377,6 +379,8 @@ public class ConfigurationControlManager {
                 return DISABLED_CORDONED_LOG_DIRS_ERROR;
             } else if (isCordonedLogDirsInvalid(configRecord, existingConfigsMap.get(CORDONED_LOG_DIRS_CONFIG), forwarded)) {
                 return INVALID_CORDONED_LOG_DIRS_ERROR;
+            } else if (isShareReleaseDelayDisabled(configRecord)) {
+                return DISABLED_SHARE_RELEASE_DELAY_ERROR;
             } else if (configRecord.value() == null) {
                 allConfigs.remove(configRecord.name());
             } else if (Utils.utf8Length(configRecord.value()) > Short.MAX_VALUE) {
@@ -439,6 +443,14 @@ public class ConfigurationControlManager {
             new ApiError(INVALID_CONFIG, "The " + CORDONED_LOG_DIRS_CONFIG + " configuration value cannot be " +
                     "set because it requires metadata.version >= " + MetadataVersion.IBP_4_3_IV0);
 
+    // The name must match GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG. The metadata module does not depend on the
+    // group coordinator module, hence the name is repeated here.
+    static final String SHARE_RELEASE_DELAY_MS_CONFIG = "share.release.delay.ms";
+
+    static final ApiError DISABLED_SHARE_RELEASE_DELAY_ERROR =
+            new ApiError(INVALID_CONFIG, "The " + SHARE_RELEASE_DELAY_MS_CONFIG + " configuration value cannot be " +
+                    "set because it requires " + ShareVersion.FEATURE_NAME + " >= " + ShareVersion.SV_3.featureLevel());
+
     static final ApiError INVALID_CORDONED_LOG_DIRS_ERROR =
             new ApiError(INVALID_CONFIG, "When updating " + CORDONED_LOG_DIRS_CONFIG + " via controllers, " +
                     " the new value must be a subset of the current configuration value.");
@@ -483,6 +495,21 @@ public class ConfigurationControlManager {
         if (configRecord.name().equals(CORDONED_LOG_DIRS_CONFIG) &&
                 configRecord.resourceType() == BROKER.id()) {
             return !featureControl.metadataVersionOrThrow().isCordonedLogDirsSupported();
+        }
+        return false;
+    }
+
+    /**
+     * Return whether setting the share group release delay must be rejected because share.version does not
+     * support it yet. Removing the configuration is always allowed.
+     *
+     * @param configRecord The configuration record
+     */
+    boolean isShareReleaseDelayDisabled(ConfigRecord configRecord) {
+        if (configRecord.name().equals(SHARE_RELEASE_DELAY_MS_CONFIG) &&
+                configRecord.resourceType() == GROUP.id() &&
+                configRecord.value() != null) {
+            return !featureControl.isShareGroupRedeliveryDelayEnabled();
         }
         return false;
     }

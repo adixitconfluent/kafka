@@ -70,6 +70,8 @@ public final class GroupConfig extends AbstractConfig {
 
     public static final String SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG = "share.partition.max.record.locks";
 
+    public static final String SHARE_RELEASE_DELAY_MS_CONFIG = "share.release.delay.ms";
+
     public static final String SHARE_AUTO_OFFSET_RESET_CONFIG = "share.auto.offset.reset";
     public static final String SHARE_AUTO_OFFSET_RESET_DEFAULT = ShareGroupAutoOffsetResetStrategy.LATEST.name();
     public static final String SHARE_AUTO_OFFSET_RESET_DOC = "The strategy to initialize the share-partition start offset. " +
@@ -145,6 +147,8 @@ public final class GroupConfig extends AbstractConfig {
     private final Optional<Integer> shareDeliveryCountLimit;
 
     private final Optional<Integer> sharePartitionMaxRecordLocks;
+
+    private final Optional<Integer> shareReleaseDelayMs;
 
     private final Optional<ShareGroupAutoOffsetResetStrategy> shareAutoOffsetReset;
 
@@ -236,6 +240,12 @@ public final class GroupConfig extends AbstractConfig {
             atLeast(100),
             MEDIUM,
             ShareGroupConfig.SHARE_GROUP_PARTITION_MAX_RECORD_LOCKS_DOC)
+        .define(SHARE_RELEASE_DELAY_MS_CONFIG,
+            INT,
+            ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_DEFAULT,
+            atLeast(0),
+            MEDIUM,
+            ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_DOC)
         .define(SHARE_AUTO_OFFSET_RESET_CONFIG,
             STRING,
             SHARE_AUTO_OFFSET_RESET_DEFAULT,
@@ -358,6 +368,7 @@ public final class GroupConfig extends AbstractConfig {
         Map.entry(SHARE_RECORD_LOCK_DURATION_MS_CONFIG, Optional.of(ShareGroupConfig.SHARE_GROUP_RECORD_LOCK_DURATION_MS_CONFIG)),
         Map.entry(SHARE_DELIVERY_COUNT_LIMIT_CONFIG, Optional.of(ShareGroupConfig.SHARE_GROUP_DELIVERY_COUNT_LIMIT_CONFIG)),
         Map.entry(SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG, Optional.of(ShareGroupConfig.SHARE_GROUP_PARTITION_MAX_RECORD_LOCKS_CONFIG)),
+        Map.entry(SHARE_RELEASE_DELAY_MS_CONFIG, Optional.of(ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_CONFIG)),
         Map.entry(SHARE_AUTO_OFFSET_RESET_CONFIG, Optional.empty()),
         Map.entry(SHARE_ISOLATION_LEVEL_CONFIG, Optional.empty()),
         Map.entry(SHARE_RENEW_ACKNOWLEDGE_ENABLE_CONFIG, Optional.empty()),
@@ -413,6 +424,7 @@ public final class GroupConfig extends AbstractConfig {
         this.shareRecordLockDurationMs = optionalInt(SHARE_RECORD_LOCK_DURATION_MS_CONFIG);
         this.shareDeliveryCountLimit = optionalInt(SHARE_DELIVERY_COUNT_LIMIT_CONFIG);
         this.sharePartitionMaxRecordLocks = optionalInt(SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG);
+        this.shareReleaseDelayMs = optionalInt(SHARE_RELEASE_DELAY_MS_CONFIG);
         this.shareAutoOffsetReset = optionalString(SHARE_AUTO_OFFSET_RESET_CONFIG)
             .map(ShareGroupAutoOffsetResetStrategy::fromString);
         this.shareAssignmentIntervalMs = optionalInt(SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG);
@@ -585,6 +597,12 @@ public final class GroupConfig extends AbstractConfig {
             SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG,
             shareGroupConfig.shareGroupMinPartitionMaxRecordLocks(),
             shareGroupConfig.shareGroupMaxPartitionMaxRecordLocks()
+        );
+        validateIntRange(
+            parsed,
+            SHARE_RELEASE_DELAY_MS_CONFIG,
+            shareGroupConfig.shareGroupMinReleaseDelayMs(),
+            shareGroupConfig.shareGroupMaxReleaseDelayMs()
         );
         validateIntRange(
             parsed,
@@ -856,6 +874,13 @@ public final class GroupConfig extends AbstractConfig {
             SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG,
             shareGroupConfig.shareGroupMinPartitionMaxRecordLocks(),
             shareGroupConfig.shareGroupMaxPartitionMaxRecordLocks()
+        );
+        clampToRange(
+            evaluatedGroupConfig,
+            groupId,
+            SHARE_RELEASE_DELAY_MS_CONFIG,
+            shareGroupConfig.shareGroupMinReleaseDelayMs(),
+            shareGroupConfig.shareGroupMaxReleaseDelayMs()
         );
         clampToRange(
             evaluatedGroupConfig,
@@ -1145,6 +1170,13 @@ public final class GroupConfig extends AbstractConfig {
      */
     public Optional<Integer> shareRecordLockDurationMs() {
         return shareRecordLockDurationMs;
+    }
+
+    /**
+     * The share group release delay milliseconds.
+     */
+    public Optional<Integer> shareReleaseDelayMs() {
+        return shareReleaseDelayMs;
     }
 
     /**

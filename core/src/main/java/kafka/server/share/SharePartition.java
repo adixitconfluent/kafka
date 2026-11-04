@@ -53,6 +53,8 @@ import org.apache.kafka.server.share.fetch.DeliveryCountOps;
 import org.apache.kafka.server.share.fetch.InFlightBatch;
 import org.apache.kafka.server.share.fetch.InFlightState;
 import org.apache.kafka.server.share.fetch.RecordState;
+import org.apache.kafka.server.share.fetch.RedeliveryDelayHandler;
+import org.apache.kafka.server.share.fetch.RedeliveryDelayTimerTask;
 import org.apache.kafka.server.share.fetch.ShareAcquiredRecords;
 import org.apache.kafka.server.share.metrics.SharePartitionMetrics;
 import org.apache.kafka.server.share.persister.GroupTopicPartitionData;
@@ -220,6 +222,13 @@ public class SharePartition implements AutoCloseable {
     private final int defaultRecordLockDurationMs;
 
     /**
+     * This is the default value which is used unless the group has a configuration which overrides it.
+     * The release delay is the duration for which a record stays unavailable for redelivery after it is
+     * made available again by a release, an acquisition lock timeout or a consumer disconnect.
+     */
+    private final int defaultReleaseDelayMs;
+
+    /**
      * The find next fetch offset is used to indicate if the next fetch offset should be recomputed.
      */
     private boolean findNextFetchOffset;
@@ -259,6 +268,17 @@ public class SharePartition implements AutoCloseable {
      * The acquisition lock timeout handler is used to handle the acquisition lock timeout for the share partition.
      */
     private final AcquisitionLockTimeoutHandler timeoutHandler;
+
+    /**
+     * The redelivery delay handler is used to make records available for redelivery once their redelivery delay expires.
+     */
+    private final RedeliveryDelayHandler redeliveryDelayHandler;
+
+    /**
+     * The redelivery delay timer tasks which have been scheduled and have not expired yet. The tasks are
+     * cancelled when the share partition is fenced or closed. Guarded by the write lock.
+     */
+    private final Set<RedeliveryDelayTimerTask> pendingRedeliveryDelays;
 
     /**
      * The metadata provider is used to resolve metadata for partition.
@@ -340,6 +360,11 @@ public class SharePartition implements AutoCloseable {
      */
     private final ShareGroupDLQManager shareGroupDLQManager;
 
+    /**
+     * Supplier to toggle the redelivery delay support.
+     */
+    private final Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier;
+
     @SuppressWarnings("ParameterNumber")
     SharePartition(
         String groupId,
@@ -348,6 +373,7 @@ public class SharePartition implements AutoCloseable {
         int defaultMaxInFlightRecords,
         int defaultMaxDeliveryCount,
         int defaultRecordLockDurationMs,
+        int defaultReleaseDelayMs,
         Timer timer,
         Time time,
         Persister persister,
@@ -356,12 +382,13 @@ public class SharePartition implements AutoCloseable {
         ShareGroupConfigProvider configProvider,
         SharePartitionListener listener,
         Supplier<Boolean> shareGroupDlqEnableSupplier,
-        ShareGroupDLQManager shareGroupDLQManager
+        ShareGroupDLQManager shareGroupDLQManager,
+        Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
     ) {
         this(groupId, topicIdPartition, leaderEpoch, defaultMaxInFlightRecords, defaultMaxDeliveryCount, defaultRecordLockDurationMs,
-            timer, time, persister, metadataProvider, delayedRequestNotifier, configProvider, SharePartitionState.EMPTY, listener,
-            new SharePartitionMetrics(groupId, topicIdPartition.topic(), topicIdPartition.partition()), shareGroupDlqEnableSupplier,
-            shareGroupDLQManager);
+            defaultReleaseDelayMs, timer, time, persister, metadataProvider, delayedRequestNotifier, configProvider,
+            SharePartitionState.EMPTY, listener, new SharePartitionMetrics(groupId, topicIdPartition.topic(), topicIdPartition.partition()),
+            shareGroupDlqEnableSupplier, shareGroupDLQManager, shareGroupRedeliveryDelayEnableSupplier);
     }
 
     // Visible for testing
@@ -373,6 +400,7 @@ public class SharePartition implements AutoCloseable {
         int defaultMaxInFlightRecords,
         int defaultMaxDeliveryCount,
         int defaultRecordLockDurationMs,
+        int defaultReleaseDelayMs,
         Timer timer,
         Time time,
         Persister persister,
@@ -383,7 +411,8 @@ public class SharePartition implements AutoCloseable {
         SharePartitionListener listener,
         SharePartitionMetrics sharePartitionMetrics,
         Supplier<Boolean> shareGroupDlqEnableSupplier,
-        ShareGroupDLQManager shareGroupDLQManager
+        ShareGroupDLQManager shareGroupDLQManager,
+        Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
     ) {
         this.groupId = groupId;
         this.topicIdPartition = topicIdPartition;
@@ -395,6 +424,7 @@ public class SharePartition implements AutoCloseable {
         this.findNextFetchOffset = false;
         this.fetchLock = new AtomicReference<>(null);
         this.defaultRecordLockDurationMs = defaultRecordLockDurationMs;
+        this.defaultReleaseDelayMs = defaultReleaseDelayMs;
         this.timer = timer;
         this.time = time;
         this.loadStartTimeMs = time.hiResClockMs();
@@ -408,10 +438,13 @@ public class SharePartition implements AutoCloseable {
         this.listener = listener;
         this.sharePartitionMetrics = sharePartitionMetrics;
         this.timeoutHandler = releaseAcquisitionLockOnTimeout();
+        this.redeliveryDelayHandler = releaseRecordsOnRedeliveryDelayExpiry();
+        this.pendingRedeliveryDelays = new HashSet<>();
         this.registerGaugeMetrics();
         this.deliveryCompleteCount = new AtomicInteger(0);
         this.shareGroupDlqEnableSupplier = shareGroupDlqEnableSupplier;
         this.shareGroupDLQManager = shareGroupDLQManager;
+        this.shareGroupRedeliveryDelayEnableSupplier = shareGroupRedeliveryDelayEnableSupplier;
     }
 
     /**
@@ -673,14 +706,14 @@ public class SharePartition implements AutoCloseable {
                 // Check if the state is maintained per offset or batch. If the offsetState
                 // is not maintained then the batch state is used to determine the offsets state.
                 if (entry.getValue().offsetState() == null) {
-                    if (entry.getValue().batchState() == RecordState.AVAILABLE && !entry.getValue().batchHasOngoingStateTransition()) {
+                    if (isAcquirable(entry.getValue())) {
                         nextFetchOffset = entry.getValue().firstOffset();
                         break;
                     }
                 } else {
                     // The offset state is maintained hence find the next available offset.
                     for (Map.Entry<Long, InFlightState> offsetState : entry.getValue().offsetState().entrySet()) {
-                        if (offsetState.getValue().state() == RecordState.AVAILABLE && !offsetState.getValue().hasOngoingStateTransition()) {
+                        if (isAcquirable(offsetState.getValue())) {
                             nextFetchOffset = offsetState.getKey();
                             break;
                         }
@@ -934,7 +967,7 @@ public class SharePartition implements AutoCloseable {
                         // acquire subset of offsets from the in-flight batch but only if the
                         // complete batch is available yet. Hence, do a pre-check to avoid exploding
                         // the in-flight offset tracking unnecessarily.
-                        if (inFlightBatch.batchState() != RecordState.AVAILABLE || inFlightBatch.batchHasOngoingStateTransition()) {
+                        if (!isAcquirable(inFlightBatch)) {
                             log.trace("The batch is not available to acquire in share partition: {}-{}, skipping: {}"
                                     + " skipping offset tracking for batch as well.", groupId,
                                 topicIdPartition, inFlightBatch);
@@ -960,7 +993,7 @@ public class SharePartition implements AutoCloseable {
                 }
 
                 // The in-flight batch is a full match hence change the state of the complete batch.
-                if (inFlightBatch.batchState() != RecordState.AVAILABLE || inFlightBatch.batchHasOngoingStateTransition()) {
+                if (!isAcquirable(inFlightBatch)) {
                     log.trace("The batch is not available to acquire in share partition: {}-{}, skipping: {}",
                         groupId, topicIdPartition, inFlightBatch);
                     continue;
@@ -1081,12 +1114,26 @@ public class SharePartition implements AutoCloseable {
 
     /**
      * Release the acquired records for the share partition. The next fetch offset is updated to the next offset
-     * that should be fetched from the leader.
+     * that should be fetched from the leader. The released records are available for redelivery immediately.
      *
      * @param memberId The member id of the client whose records shall be released.
      * @return A future which is completed when the records are released.
      */
     public CompletableFuture<Void> releaseAcquiredRecords(String memberId) {
+        return releaseAcquiredRecords(memberId, false);
+    }
+
+    /**
+     * Release the acquired records for the share partition. The next fetch offset is updated to the next offset
+     * that should be fetched from the leader.
+     *
+     * @param memberId The member id of the client whose records shall be released.
+     * @param applyRedeliveryDelay Whether the redelivery delay applies to the released records. The delay applies
+     *                             when the records are released because the client disconnected, but not when the
+     *                             client closed its share session.
+     * @return A future which is completed when the records are released.
+     */
+    public CompletableFuture<Void> releaseAcquiredRecords(String memberId, boolean applyRedeliveryDelay) {
         log.trace("Release acquired records request for share partition: {}-{} memberId: {}", groupId, topicIdPartition, memberId);
 
         CompletableFuture<Void> future = new CompletableFuture<>();
@@ -1110,14 +1157,16 @@ public class SharePartition implements AutoCloseable {
                 }
 
                 if (inFlightBatch.offsetState() != null) {
-                    Optional<Throwable> releaseAcquiredRecordsThrowable = releaseAcquiredRecordsForPerOffsetBatch(memberId, inFlightBatch, recordState, persisterBatches);
+                    Optional<Throwable> releaseAcquiredRecordsThrowable = releaseAcquiredRecordsForPerOffsetBatch(memberId, inFlightBatch,
+                        recordState, applyRedeliveryDelay, persisterBatches);
                     if (releaseAcquiredRecordsThrowable.isPresent()) {
                         throwable = releaseAcquiredRecordsThrowable.get();
                         break;
                     }
                     continue;
                 }
-                Optional<Throwable> releaseAcquiredRecordsThrowable = releaseAcquiredRecordsForCompleteBatch(memberId, inFlightBatch, recordState, persisterBatches);
+                Optional<Throwable> releaseAcquiredRecordsThrowable = releaseAcquiredRecordsForCompleteBatch(memberId, inFlightBatch,
+                    recordState, applyRedeliveryDelay, persisterBatches);
                 if (releaseAcquiredRecordsThrowable.isPresent()) {
                     throwable = releaseAcquiredRecordsThrowable.get();
                     break;
@@ -1138,6 +1187,12 @@ public class SharePartition implements AutoCloseable {
             log.warn("Closing share partition: {}-{} while in active state. Consider marking it fenced "
                 + "before close.", groupId, topicIdPartition);
         }
+        lock.writeLock().lock();
+        try {
+            cancelPendingRedeliveryDelays();
+        } finally {
+            lock.writeLock().unlock();
+        }
         // Deregister the share partition metrics on teardown.
         Utils.closeQuietly(sharePartitionMetrics, "sharePartitionMetrics");
     }
@@ -1149,6 +1204,7 @@ public class SharePartition implements AutoCloseable {
     private Optional<Throwable> releaseAcquiredRecordsForPerOffsetBatch(String memberId,
                                                                         InFlightBatch inFlightBatch,
                                                                         RecordState recordState,
+                                                                        boolean applyRedeliveryDelay,
                                                                         List<PersisterBatch> persisterBatches) {
 
         log.trace("Offset tracked batch record found, batch: {} for the share partition: {}-{}", inFlightBatch,
@@ -1180,7 +1236,8 @@ public class SharePartition implements AutoCloseable {
                 // Successfully updated the state of the offset and created a persister state batch for write to persister.
                 Throwable dlqCause = updateResult.state() == RecordState.ARCHIVING ? ShareGroupDLQManager.DELIVERY_COUNT_EXCEEDED : null;
                 persisterBatches.add(new PersisterBatch(updateResult, new PersisterStateBatch(offsetState.getKey(),
-                    offsetState.getKey(), updateResult.state().id(), (short) updateResult.deliveryCount()), dlqCause));
+                    offsetState.getKey(), updateResult.state().id(), (short) updateResult.deliveryCount()), dlqCause,
+                    applyRedeliveryDelay));
                 if (offsetState.getKey() >= startOffset && isStateTerminal(updateResult.state())) {
                     deliveryCompleteCount.incrementAndGet();
                 }
@@ -1193,6 +1250,7 @@ public class SharePartition implements AutoCloseable {
     private Optional<Throwable> releaseAcquiredRecordsForCompleteBatch(String memberId,
                                                                        InFlightBatch inFlightBatch,
                                                                        RecordState recordState,
+                                                                       boolean applyRedeliveryDelay,
                                                                        List<PersisterBatch> persisterBatches) {
 
         // Check if member id is the owner of the batch.
@@ -1224,7 +1282,8 @@ public class SharePartition implements AutoCloseable {
             // If DLQ support is enabled, then update the DLQ cause exception message.
             Throwable dlqCause = updateResult.state() == RecordState.ARCHIVING ? ShareGroupDLQManager.DELIVERY_COUNT_EXCEEDED : null;
             persisterBatches.add(new PersisterBatch(updateResult, new PersisterStateBatch(inFlightBatch.firstOffset(),
-                inFlightBatch.lastOffset(), updateResult.state().id(), (short) updateResult.deliveryCount()), dlqCause));
+                inFlightBatch.lastOffset(), updateResult.state().id(), (short) updateResult.deliveryCount()), dlqCause,
+                applyRedeliveryDelay));
             if (isStateTerminal(updateResult.state())) {
                 deliveryCompleteCount.addAndGet(numInFlightRecordsInBatch(inFlightBatch.firstOffset(), inFlightBatch.lastOffset()));
             }
@@ -1597,6 +1656,7 @@ public class SharePartition implements AutoCloseable {
         lock.writeLock().lock();
         try {
             partitionState = SharePartitionState.FENCED;
+            cancelPendingRedeliveryDelays();
         } finally {
             lock.writeLock().unlock();
         }
@@ -1996,7 +2056,7 @@ public class SharePartition implements AutoCloseable {
                     break;
                 }
 
-                if (offsetState.getValue().state() != RecordState.AVAILABLE || offsetState.getValue().hasOngoingStateTransition()) {
+                if (!isAcquirable(offsetState.getValue())) {
                     log.trace("The offset {} is not available in share partition: {}-{}, skipping: {}",
                         offsetState.getKey(), groupId, topicIdPartition, inFlightBatch);
                     continue;
@@ -2116,10 +2176,10 @@ public class SharePartition implements AutoCloseable {
         int throttleRecordsDeliveryLimit = throttleRecordsDeliveryLimit(maxDeliveryCount());
         if (inFlightBatch.offsetState() == null) {
             // If offsetState is null, it means the batch is not split and represents a single batch.
-            // Check if the batch is in AVAILABLE state and has no ongoing transition.
-            // The requested batch shall always be within the request first and last offset as the sub
+            // Check if the batch is acquirable i.e. AVAILABLE, with no ongoing transition and no pending
+            // redelivery delay. The requested batch shall always be within the request first and last offset as the sub
             // map batches are only fetched to consider.
-            if (inFlightBatch.batchState() == RecordState.AVAILABLE && !inFlightBatch.batchHasOngoingStateTransition()) {
+            if (isAcquirable(inFlightBatch)) {
                 return inFlightBatch.batchDeliveryCount() >= throttleRecordsDeliveryLimit;
             }
             return false;
@@ -2132,7 +2192,7 @@ public class SharePartition implements AutoCloseable {
             if (entry.getKey() > requestLastOffset) {
                 return false;
             }
-            return entry.getValue().state() == RecordState.AVAILABLE && !entry.getValue().hasOngoingStateTransition();
+            return isAcquirable(entry.getValue());
         }).mapToInt(entry -> entry.getValue().deliveryCount()).max().orElse(0) >= throttleRecordsDeliveryLimit;
     }
 
@@ -2406,8 +2466,10 @@ public class SharePartition implements AutoCloseable {
                     }
 
                     // Successfully updated the state of the offset and created a persister state batch for write to persister.
+                    // The redelivery delay applies to records released by the client.
                     persisterBatches.add(new PersisterBatch(updateResult, new PersisterStateBatch(offsetState.getKey(),
-                        offsetState.getKey(), updateResult.state().id(), (short) updateResult.deliveryCount()), dlqCause));
+                        offsetState.getKey(), updateResult.state().id(), (short) updateResult.deliveryCount()), dlqCause,
+                        ackType == AcknowledgeType.RELEASE.id));
                     if (isStateTerminal(updateResult.state())) {
                         deliveryCompleteCount.incrementAndGet();
                     }
@@ -2493,8 +2555,10 @@ public class SharePartition implements AutoCloseable {
             }
 
             // Successfully updated the state of the batch and created a persister state batch for write to persister.
+            // The redelivery delay applies to records released by the client.
             persisterBatches.add(new PersisterBatch(updateResult, new PersisterStateBatch(inFlightBatch.firstOffset(),
-                inFlightBatch.lastOffset(), updateResult.state().id(), (short) updateResult.deliveryCount()), dlqCause));
+                inFlightBatch.lastOffset(), updateResult.state().id(), (short) updateResult.deliveryCount()), dlqCause,
+                ackType == AcknowledgeType.RELEASE.id));
             if (isStateTerminal(updateResult.state())) {
                 deliveryCompleteCount.addAndGet((int) (inFlightBatch.lastOffset() - inFlightBatch.firstOffset() + 1));
             }
@@ -2547,10 +2611,13 @@ public class SharePartition implements AutoCloseable {
                 // Log in DEBUG to avoid flooding of logs for a faulty client.
                 log.debug("Request failed for updating state, rollback any changed state"
                     + " for the share partition: {}-{}", groupId, topicIdPartition);
+                List<RedeliveryDelayCandidate> delayCandidates = new ArrayList<>();
                 persisterBatches.forEach(persisterBatch -> {
                     persisterBatch.updatedState.completeStateTransition(false);
                     if (persisterBatch.updatedState.state() == RecordState.AVAILABLE) {
-                        updateFindNextFetchOffset(true);
+                        // The records are available after rollback only if the acquisition lock expired during the
+                        // state transition, hence the redelivery delay applies as for an acquisition lock timeout.
+                        delayCandidates.add(redeliveryDelayCandidate(persisterBatch));
                     }
                     // If there is a failure, then update the deliveryCompleteCount only in case there are some records
                     // which were in a Terminal state, but after rolling back they are in a non-Terminal state. We also
@@ -2560,6 +2627,7 @@ public class SharePartition implements AutoCloseable {
                         deliveryCompleteCount.addAndGet(-numInFlightRecordsInBatch(persisterBatch.stateBatch.firstOffset(), persisterBatch.stateBatch.lastOffset()));
                     }
                 });
+                applyRedeliveryDelay(delayCandidates);
             } finally {
                 lock.writeLock().unlock();
             }
@@ -2586,10 +2654,13 @@ public class SharePartition implements AutoCloseable {
                             groupId, topicIdPartition, exception);
                         // In case of failure when transition state is rolled back then it should be rolled
                         // back to ACQUIRED state, unless acquisition lock for the state has expired.
+                        List<RedeliveryDelayCandidate> delayCandidates = new ArrayList<>();
                         persisterBatches.forEach(persisterBatch -> {
                             persisterBatch.updatedState().completeStateTransition(false);
                             if (persisterBatch.updatedState().state() == RecordState.AVAILABLE) {
-                                updateFindNextFetchOffset(true);
+                                // The records are available after rollback only if the acquisition lock expired during the
+                                // state transition, hence the redelivery delay applies as for an acquisition lock timeout.
+                                delayCandidates.add(redeliveryDelayCandidate(persisterBatch));
                             }
                             // If there is a failure, then update the deliveryCompleteCount only in case there are some records
                             // which were in a Terminal state, but after rolling back they are in a non-Terminal state. We also
@@ -2599,21 +2670,30 @@ public class SharePartition implements AutoCloseable {
                                 deliveryCompleteCount.addAndGet(-numInFlightRecordsInBatch(persisterBatch.stateBatch.firstOffset(), persisterBatch.stateBatch.lastOffset()));
                             }
                         });
+                        applyRedeliveryDelay(delayCandidates);
                         return;
                     }
 
                     log.trace("State change request successful for share partition: {}-{}",
                         groupId, topicIdPartition);
 
+                    List<RedeliveryDelayCandidate> delayCandidates = new ArrayList<>();
                     for (PersisterBatch persisterBatch : persisterBatches) {
                         persisterBatch.updatedState().completeStateTransition(true);
                         if (persisterBatch.updatedState.state() == RecordState.AVAILABLE) {
-                            updateFindNextFetchOffset(true);
+                            if (persisterBatch.delayOnAvailable()) {
+                                // The records are not acquirable until the redelivery delay expires, hence the
+                                // next fetch offset is updated when the delay expires instead.
+                                delayCandidates.add(redeliveryDelayCandidate(persisterBatch));
+                            } else {
+                                updateFindNextFetchOffset(true);
+                            }
                         }
                         if (persisterBatch.updatedState.state() == RecordState.ARCHIVING) {
                             dlqBatches.add(persisterBatch);
                         }
                     }
+                    applyRedeliveryDelay(delayCandidates);
 
                     // Update the cached state and start and end offsets after acknowledging/releasing the acquired records.
                     cacheStateUpdated = maybeUpdateCachedStateAndOffsets();
@@ -2789,6 +2869,40 @@ public class SharePartition implements AutoCloseable {
      */
     private boolean isStateTerminal(RecordState recordState) {
         return recordState == RecordState.ACKNOWLEDGED || recordState == RecordState.ARCHIVED;
+    }
+
+    /**
+     * The records are acquirable if they are available, have no ongoing state transition and are not
+     * waiting for their redelivery delay to expire.
+     *
+     * @param inFlightState The state of the records.
+     *
+     * @return True if the records are acquirable, false otherwise.
+     */
+    private boolean isAcquirable(InFlightState inFlightState) {
+        return inFlightState.state() == RecordState.AVAILABLE
+            && !inFlightState.hasOngoingStateTransition()
+            && !isRedeliveryDelayed(inFlightState.redeliveryDelayTask());
+    }
+
+    /**
+     * The batch is acquirable if it's available, has no ongoing state transition and is not waiting
+     * for its redelivery delay to expire. The batch state must not be maintained per offset.
+     *
+     * @param inFlightBatch The in-flight batch.
+     *
+     * @return True if the batch is acquirable, false otherwise.
+     */
+    private boolean isAcquirable(InFlightBatch inFlightBatch) {
+        return inFlightBatch.batchState() == RecordState.AVAILABLE
+            && !inFlightBatch.batchHasOngoingStateTransition()
+            && !isRedeliveryDelayed(inFlightBatch.batchRedeliveryDelayTask());
+    }
+
+    private boolean isRedeliveryDelayed(RedeliveryDelayTimerTask redeliveryDelayTask) {
+        // The expiry of the timer task clears the delay. The expiration time is checked as well so that the
+        // records become acquirable once the delay has elapsed, even if the timer task expiry is not processed.
+        return redeliveryDelayTask != null && time.hiResClockMs() < redeliveryDelayTask.expirationMs();
     }
 
     /**
@@ -2973,6 +3087,7 @@ public class SharePartition implements AutoCloseable {
         return (memberId, firstOffset, lastOffset, timerTask) -> {
             List<PersisterStateBatch> stateBatches;
             List<DlqBatch> dlqBatches;
+            List<RedeliveryDelayCandidate> delayCandidates;
 
             lock.writeLock().lock();
             try {
@@ -2991,6 +3106,7 @@ public class SharePartition implements AutoCloseable {
                 }
                 stateBatches = new ArrayList<>();
                 dlqBatches = new ArrayList<>();
+                delayCandidates = new ArrayList<>();
                 NavigableMap<Long, InFlightBatch> subMap = cachedState.subMap(floorOffset.getKey(), true, lastOffset, true);
                 for (Map.Entry<Long, InFlightBatch> entry : subMap.entrySet()) {
                     InFlightBatch inFlightBatch = entry.getValue();
@@ -3006,11 +3122,14 @@ public class SharePartition implements AutoCloseable {
 
                     // Case when the state of complete batch is valid
                     if (inFlightBatch.offsetState() == null) {
-                        releaseAcquisitionLockOnTimeoutForCompleteBatch(inFlightBatch, stateBatches, dlqBatches, memberId);
+                        releaseAcquisitionLockOnTimeoutForCompleteBatch(inFlightBatch, stateBatches, dlqBatches, delayCandidates, memberId);
                     } else { // Case when batch has a valid offset state map.
-                        releaseAcquisitionLockOnTimeoutForPerOffsetBatch(inFlightBatch, stateBatches, dlqBatches, memberId, firstOffset, lastOffset);
+                        releaseAcquisitionLockOnTimeoutForPerOffsetBatch(inFlightBatch, stateBatches, dlqBatches, delayCandidates,
+                            memberId, firstOffset, lastOffset);
                     }
                 }
+                // The records whose acquisition lock timed out are not acquirable until their redelivery delay expires.
+                applyRedeliveryDelay(delayCandidates);
             } finally {
                 lock.writeLock().unlock();
             }
@@ -3046,6 +3165,7 @@ public class SharePartition implements AutoCloseable {
     private void releaseAcquisitionLockOnTimeoutForCompleteBatch(InFlightBatch inFlightBatch,
                                                                  List<PersisterStateBatch> stateBatches,
                                                                  List<DlqBatch> dlqBatches,
+                                                                 List<RedeliveryDelayCandidate> delayCandidates,
                                                                  String memberId) {
         if (inFlightBatch.batchState() == RecordState.ACQUIRED) {
             InFlightState updateResult = inFlightBatch.tryUpdateBatchState(
@@ -3074,8 +3194,10 @@ public class SharePartition implements AutoCloseable {
                 return;
             }
 
-            if (updateResult.state() != RecordState.ARCHIVED) {
-                updateFindNextFetchOffset(true);
+            if (updateResult.state() == RecordState.AVAILABLE) {
+                // The next fetch offset is updated once the redelivery delay, if any, is applied.
+                delayCandidates.add(new RedeliveryDelayCandidate(updateResult, inFlightBatch.firstOffset(),
+                    inFlightBatch.lastOffset(), updateResult.deliveryCount()));
             }
             // If after acquisition lock timeout, a batch is moved to ARCHIVED state, then we have records moved from
             // non-Terminal state to a Terminal state. Hence, we need to update deliveryCompleteCount. But there could
@@ -3094,6 +3216,7 @@ public class SharePartition implements AutoCloseable {
     private void releaseAcquisitionLockOnTimeoutForPerOffsetBatch(InFlightBatch inFlightBatch,
                                                                   List<PersisterStateBatch> stateBatches,
                                                                   List<DlqBatch> dlqBatches,
+                                                                  List<RedeliveryDelayCandidate> delayCandidates,
                                                                   String memberId,
                                                                   long firstOffset,
                                                                   long lastOffset) {
@@ -3140,8 +3263,10 @@ public class SharePartition implements AutoCloseable {
                 continue;
             }
 
-            if (updateResult.state() != RecordState.ARCHIVED) {
-                updateFindNextFetchOffset(true);
+            if (updateResult.state() == RecordState.AVAILABLE) {
+                // The next fetch offset is updated once the redelivery delay, if any, is applied.
+                delayCandidates.add(new RedeliveryDelayCandidate(updateResult, offsetState.getKey(),
+                    offsetState.getKey(), updateResult.deliveryCount()));
             }
             // If after acquisition lock timeout, an offset state is moved to ARCHIVED, then we have records moved from
             // non-Terminal state to a Terminal state. Hence, we need to update deliveryCompleteCount, but only if the
@@ -3151,6 +3276,105 @@ public class SharePartition implements AutoCloseable {
                 deliveryCompleteCount.incrementAndGet();
             }
         }
+    }
+
+    private static RedeliveryDelayCandidate redeliveryDelayCandidate(PersisterBatch persisterBatch) {
+        return new RedeliveryDelayCandidate(persisterBatch.updatedState(), persisterBatch.stateBatch().firstOffset(),
+            persisterBatch.stateBatch().lastOffset(), persisterBatch.updatedState().deliveryCount());
+    }
+
+    /**
+     * Apply the redelivery delay to the records which are made available again by a release, an acquisition
+     * lock timeout or a consumer disconnect. The records are not acquirable until the delay expires. Contiguous
+     * records with the same delivery count share a single timer task. If no delay applies, the records are
+     * available for redelivery immediately.
+     * <p>
+     * The method must be called while holding the write lock.
+     *
+     * @param candidates The records made available again, in increasing offset order.
+     */
+    private void applyRedeliveryDelay(List<RedeliveryDelayCandidate> candidates) {
+        int start = 0;
+        while (start < candidates.size()) {
+            RedeliveryDelayCandidate first = candidates.get(start);
+            int end = start;
+            while (end + 1 < candidates.size()
+                && candidates.get(end + 1).firstOffset() == candidates.get(end).lastOffset() + 1
+                && candidates.get(end + 1).deliveryCount() == first.deliveryCount()) {
+                end++;
+            }
+
+            long delayMs = redeliveryDelayMs(first.deliveryCount());
+            if (delayMs <= 0) {
+                // No delay applies, hence the records are available for redelivery immediately.
+                updateFindNextFetchOffset(true);
+            } else {
+                long lastOffset = candidates.get(end).lastOffset();
+                RedeliveryDelayTimerTask timerTask = new RedeliveryDelayTimerTask(time, delayMs, first.firstOffset(),
+                    lastOffset, redeliveryDelayHandler);
+                for (int i = start; i <= end; i++) {
+                    candidates.get(i).state().startRedeliveryDelay(timerTask);
+                }
+                pendingRedeliveryDelays.add(timerTask);
+                timer.add(timerTask);
+                log.trace("Delaying redelivery of offsets {}-{} by {} ms for share partition: {}-{}",
+                    first.firstOffset(), lastOffset, delayMs, groupId, topicIdPartition);
+            }
+            start = end + 1;
+        }
+    }
+
+    private RedeliveryDelayHandler releaseRecordsOnRedeliveryDelayExpiry() {
+        return (firstOffset, lastOffset, timerTask) -> {
+            boolean anyRecordAvailable = false;
+            lock.writeLock().lock();
+            try {
+                pendingRedeliveryDelays.remove(timerTask);
+                // The timer task is cancelled when the share partition is fenced or closed.
+                if (timerTask.isCancelled() || partitionState != SharePartitionState.ACTIVE) {
+                    log.debug("Redelivery delay timer task is cancelled or the share partition {}-{} is not active, "
+                        + "not executing further.", groupId, topicIdPartition);
+                    return;
+                }
+
+                // The records might have been acquired or archived after the delay started, or might be waiting
+                // for another delay, hence only clear the delay of the records which still reference this task.
+                Map.Entry<Long, InFlightBatch> floorEntry = cachedState.floorEntry(firstOffset);
+                long fromKey = floorEntry != null ? floorEntry.getKey() : firstOffset;
+                for (InFlightBatch inFlightBatch : cachedState.subMap(fromKey, true, lastOffset, true).values()) {
+                    if (inFlightBatch.offsetState() == null) {
+                        if (inFlightBatch.batchRedeliveryDelayTask() == timerTask) {
+                            inFlightBatch.clearBatchRedeliveryDelay();
+                            anyRecordAvailable = true;
+                        }
+                        continue;
+                    }
+                    for (InFlightState offsetState : inFlightBatch.offsetState().subMap(firstOffset, true, lastOffset, true).values()) {
+                        if (offsetState.redeliveryDelayTask() == timerTask) {
+                            offsetState.clearRedeliveryDelay();
+                            anyRecordAvailable = true;
+                        }
+                    }
+                }
+                if (anyRecordAvailable) {
+                    updateFindNextFetchOffset(true);
+                }
+            } finally {
+                lock.writeLock().unlock();
+            }
+            // The records are available for redelivery now, hence complete the pending delayed share fetch
+            // requests for the share partition. The call should be made outside the lock to avoid deadlock.
+            maybeCompleteDelayedShareFetchRequest(anyRecordAvailable);
+        };
+    }
+
+    /**
+     * Cancel the redelivery delay timer tasks which have not expired yet, so that the timer does not retain
+     * the share partition. The method must be called while holding the write lock.
+     */
+    private void cancelPendingRedeliveryDelays() {
+        pendingRedeliveryDelays.forEach(RedeliveryDelayTimerTask::cancel);
+        pendingRedeliveryDelays.clear();
     }
 
     private void maybeCompleteDelayedShareFetchRequest(boolean shouldComplete) {
@@ -3539,6 +3763,29 @@ public class SharePartition implements AutoCloseable {
     }
 
     /**
+     * Returns the effective release delay for this share partition, using the per-group dynamic config
+     * if available, otherwise the broker default. The delay is 0 if the redelivery delay is not supported.
+     */
+    int releaseDelayMs() {
+        if (!shareGroupRedeliveryDelayEnableSupplier.get()) {
+            return 0;
+        }
+        return configProvider.releaseDelayMsOrDefault(groupId, defaultReleaseDelayMs);
+    }
+
+    /**
+     * Returns the delay before records become available for redelivery after their delivery attempt
+     * with the given delivery count has ended.
+     *
+     * @param deliveryCount The delivery count of the delivery attempt which has ended.
+     *
+     * @return The redelivery delay in milliseconds.
+     */
+    private long redeliveryDelayMs(int deliveryCount) {
+        return releaseDelayMs();
+    }
+
+    /**
      * Returns the throttle records delivery limit, computed as half of the effective max delivery
      * count rounded up, with a minimum of {@link #MINIMUM_THROTTLE_RECORDS_DELIVERY_LIMIT}.
      */
@@ -3612,11 +3859,25 @@ public class SharePartition implements AutoCloseable {
     /**
      * PersisterBatch class is used to record the state updates for a batch or an offset.
      * It contains the updated in-flight state and the persister state batch to be sent to persister.
+     * The delayOnAvailable flag indicates whether the redelivery delay applies if the records are made
+     * available again by the state update.
      */
     private record PersisterBatch(
         InFlightState updatedState,
         PersisterStateBatch stateBatch,
-        Throwable dlqCause
+        Throwable dlqCause,
+        boolean delayOnAvailable
+    ) { }
+
+    /**
+     * RedeliveryDelayCandidate is used to collect the records which are made available again, and to which
+     * the redelivery delay might apply.
+     */
+    private record RedeliveryDelayCandidate(
+        InFlightState state,
+        long firstOffset,
+        long lastOffset,
+        int deliveryCount
     ) { }
 
     /**

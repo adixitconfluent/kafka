@@ -29,10 +29,12 @@ import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.InvalidConfigurationException;
 import org.apache.kafka.common.test.ClusterInstance;
 import org.apache.kafka.common.test.api.ClusterConfigProperty;
+import org.apache.kafka.common.test.api.ClusterFeature;
 import org.apache.kafka.common.test.api.ClusterTest;
 import org.apache.kafka.common.test.api.ClusterTestDefaults;
 import org.apache.kafka.common.test.api.Type;
 import org.apache.kafka.coordinator.group.GroupConfig;
+import org.apache.kafka.server.common.Feature;
 import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.Timeout;
@@ -339,6 +341,67 @@ public class ShareConsumerDeliveryTest extends ShareConsumerTestBase {
             ConsumerRecords<byte[], byte[]> records = waitedPoll(shareConsumer, 2500L, 1);
             assertEquals(1, records.count());
             assertEquals((short) 3, records.records(tp).get(0).deliveryCount().get());
+        }
+    }
+
+    @ClusterTest(
+        features = {
+            @ClusterFeature(feature = Feature.SHARE_VERSION, version = 3)
+        }
+    )
+    public void testReleasedRecordIsRedeliveredAfterReleaseDelay() {
+        int releaseDelayMs = 6000;
+        alterShareAutoOffsetReset("group1", "earliest");
+        alterShareReleaseDelayMs("group1", releaseDelayMs);
+        try (Producer<byte[], byte[]> producer = createProducer();
+             ShareConsumer<byte[], byte[]> shareConsumer = createShareConsumer(
+                 "group1",
+                 Map.of(ConsumerConfig.SHARE_ACKNOWLEDGEMENT_MODE_CONFIG, EXPLICIT))) {
+
+            ProducerRecord<byte[], byte[]> record = new ProducerRecord<>(tp.topic(), tp.partition(), null,
+                "key".getBytes(), "value".getBytes());
+            producer.send(record);
+            producer.flush();
+
+            shareConsumer.subscribe(Set.of(tp.topic()));
+            ConsumerRecords<byte[], byte[]> records = waitedPoll(shareConsumer, 2500L, 1);
+            assertEquals(1, records.count());
+            assertEquals((short) 1, records.records(tp).get(0).deliveryCount().get());
+
+            // Release the record, it is available for redelivery only once the release delay expires.
+            shareConsumer.acknowledge(records.records(tp).get(0), AcknowledgeType.RELEASE);
+            long releaseTimeMs = System.currentTimeMillis();
+            Map<TopicIdPartition, Optional<KafkaException>> result = shareConsumer.commitSync();
+            assertEquals(1, result.size());
+            result.values().forEach(exception -> assertTrue(exception.isEmpty()));
+
+            records = shareConsumer.poll(Duration.ofMillis(2500));
+            assertEquals(0, records.count());
+
+            records = shareConsumer.poll(Duration.ofMillis(2500));
+            assertEquals(0, records.count());
+
+            records = waitedPoll(shareConsumer, 2500L, 1);
+            assertEquals(1, records.count());
+            assertEquals((short) 2, records.records(tp).get(0).deliveryCount().get());
+            assertTrue(System.currentTimeMillis() - releaseTimeMs >= releaseDelayMs,
+                "The released record was redelivered before the release delay expired");
+        }
+    }
+
+    @ClusterTest(
+        features = {
+            @ClusterFeature(feature = Feature.SHARE_VERSION, version = 2)
+        }
+    )
+    public void testReleaseDelayConfigRequiresShareVersion3() {
+        ConfigResource configResource = new ConfigResource(ConfigResource.Type.GROUP, "group1");
+        Map<ConfigResource, Collection<AlterConfigOp>> alterEntries = Map.of(configResource, List.of(new AlterConfigOp(
+            new ConfigEntry(GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG, "1000"), AlterConfigOp.OpType.SET)));
+        try (Admin adminClient = createAdminClient()) {
+            ExecutionException e = assertThrows(ExecutionException.class, () ->
+                adminClient.incrementalAlterConfigs(alterEntries).all().get());
+            assertInstanceOf(InvalidConfigurationException.class, e.getCause());
         }
     }
 

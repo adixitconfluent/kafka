@@ -141,6 +141,8 @@ public enum MetadataVersion {
     //
 
     // New version for the Kafka 4.5.0 release.
+    // IBP_4_5_IV0 enables the redelivery delay for share groups. When this version
+    // is finalized, so will the redelivery delay support.
     IBP_4_5_IV0(34, "4.5", "IV0", false);
 
     // NOTES when adding a new version:

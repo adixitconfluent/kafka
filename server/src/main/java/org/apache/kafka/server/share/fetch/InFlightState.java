@@ -50,6 +50,10 @@ public class InFlightState {
     private RollbackState rollbackState;
     // The timer task for the acquisition lock timeout.
     private AcquisitionLockTimerTask acquisitionLockTimeoutTask;
+    // The timer task for the redelivery delay. The record is not acquirable until the task expires, though the
+    // state is AVAILABLE. The task can be shared by the per-offset states of contiguous records, hence it's kept
+    // separately from the acquisition lock timeout task which is cancelled on state transitions.
+    private RedeliveryDelayTimerTask redeliveryDelayTask;
     // The boolean determines if the record has achieved a terminal state of ARCHIVED from which it cannot transition
     // to any other state. This could happen because of LSO movement etc.
     private boolean isTerminalState = false;
@@ -122,6 +126,31 @@ public class InFlightState {
     }
 
     /**
+     * @return The timer task for the redelivery delay, or null if the record is not waiting for a redelivery delay.
+     */
+    public RedeliveryDelayTimerTask redeliveryDelayTask() {
+        return redeliveryDelayTask;
+    }
+
+    /**
+     * Start the redelivery delay for the record. The record is not acquirable until the timer task
+     * expires or the delay is cleared.
+     *
+     * @param redeliveryDelayTask The timer task for the redelivery delay.
+     */
+    public void startRedeliveryDelay(RedeliveryDelayTimerTask redeliveryDelayTask) {
+        this.redeliveryDelayTask = redeliveryDelayTask;
+    }
+
+    /**
+     * Clear the redelivery delay for the record. The timer task is not cancelled as it can be shared
+     * by the states of other records.
+     */
+    public void clearRedeliveryDelay() {
+        redeliveryDelayTask = null;
+    }
+
+    /**
      * Check if there is an ongoing state transition for the records.
      * This method checks if the rollbackState is not null, which indicates that
      * there has been a state transition that has not been committed yet.
@@ -167,6 +196,10 @@ public class InFlightState {
             if (newState != RecordState.ARCHIVED) {
                 deliveryCount = updatedDeliveryCount(ops);
             }
+            if (newState == RecordState.ACQUIRED) {
+                // A record which is acquired is no longer waiting for its redelivery delay.
+                redeliveryDelayTask = null;
+            }
             memberId = newMemberId;
             return this;
         } catch (IllegalStateException e) {
@@ -185,6 +218,7 @@ public class InFlightState {
         state = RecordState.ARCHIVED;
         memberId = EMPTY_MEMBER_ID;
         cancelAndClearAcquisitionLockTimeoutTask();
+        clearRedeliveryDelay();
     }
 
     /**
@@ -275,6 +309,7 @@ public class InFlightState {
             "state=" + state.toString() +
             ", deliveryCount=" + deliveryCount +
             ", memberId=" + memberId +
+            ", redeliveryDelayed=" + (redeliveryDelayTask != null) +
             ")";
     }
 

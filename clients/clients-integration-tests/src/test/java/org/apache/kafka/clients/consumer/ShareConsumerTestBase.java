@@ -549,6 +549,10 @@ public abstract class ShareConsumerTestBase {
         alterShareGroupConfig(groupId, GroupConfig.SHARE_RECORD_LOCK_DURATION_MS_CONFIG, Integer.toString(newValue));
     }
 
+    protected void alterShareReleaseDelayMs(String groupId, int newValue) {
+        alterShareGroupConfig(groupId, GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG, Integer.toString(newValue));
+    }
+
     /**
      * Test utility which encapsulates a {@link ShareConsumer} whose record processing
      * behavior can be supplied as a function argument.

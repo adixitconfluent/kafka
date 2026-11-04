@@ -144,6 +144,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -1037,9 +1038,9 @@ public class SharePartitionManagerTest {
         SharePartition sp1 = mock(SharePartition.class);
         SharePartition sp2 = mock(SharePartition.class);
 
-        when(sp0.releaseAcquiredRecords(ArgumentMatchers.eq(String.valueOf(memberId1)))).thenReturn(CompletableFuture.completedFuture(null));
-        when(sp1.releaseAcquiredRecords(ArgumentMatchers.eq(String.valueOf(memberId1)))).thenReturn(CompletableFuture.completedFuture(null));
-        when(sp2.releaseAcquiredRecords(ArgumentMatchers.eq(String.valueOf(memberId1)))).thenReturn(CompletableFuture.completedFuture(null));
+        when(sp0.releaseAcquiredRecords(ArgumentMatchers.eq(String.valueOf(memberId1)), ArgumentMatchers.eq(false))).thenReturn(CompletableFuture.completedFuture(null));
+        when(sp1.releaseAcquiredRecords(ArgumentMatchers.eq(String.valueOf(memberId1)), ArgumentMatchers.eq(false))).thenReturn(CompletableFuture.completedFuture(null));
+        when(sp2.releaseAcquiredRecords(ArgumentMatchers.eq(String.valueOf(memberId1)), ArgumentMatchers.eq(false))).thenReturn(CompletableFuture.completedFuture(null));
 
         SharePartitionCache partitionCache = new SharePartitionCache();
         partitionCache.put(new SharePartitionKey(groupId, tp0), sp0);
@@ -1343,8 +1344,8 @@ public class SharePartitionManagerTest {
 
         SharePartition sp1 = mock(SharePartition.class);
         SharePartition sp2 = mock(SharePartition.class);
-        when(sp1.releaseAcquiredRecords(ArgumentMatchers.eq(memberId))).thenReturn(CompletableFuture.completedFuture(null));
-        when(sp2.releaseAcquiredRecords(ArgumentMatchers.eq(memberId))).thenReturn(CompletableFuture.failedFuture(
+        when(sp1.releaseAcquiredRecords(ArgumentMatchers.eq(memberId), ArgumentMatchers.eq(false))).thenReturn(CompletableFuture.completedFuture(null));
+        when(sp2.releaseAcquiredRecords(ArgumentMatchers.eq(memberId), ArgumentMatchers.eq(false))).thenReturn(CompletableFuture.failedFuture(
                 new InvalidRecordStateException("Unable to release acquired records for the batch")
         ));
 
@@ -2000,12 +2001,12 @@ public class SharePartitionManagerTest {
         doAnswer(invocation -> {
             when(sp1.canAcquireRecords()).thenReturn(true);
             return CompletableFuture.completedFuture(Optional.empty());
-        }).when(sp1).releaseAcquiredRecords(ArgumentMatchers.eq(memberId));
+        }).when(sp1).releaseAcquiredRecords(ArgumentMatchers.eq(memberId), ArgumentMatchers.eq(false));
         doAnswer(invocation -> {
             when(sp2.canAcquireRecords()).thenReturn(true);
             return CompletableFuture.completedFuture(Optional.empty());
-        }).when(sp2).releaseAcquiredRecords(ArgumentMatchers.eq(memberId));
-        when(sp3.releaseAcquiredRecords(ArgumentMatchers.eq(memberId))).thenReturn(CompletableFuture.completedFuture(null));
+        }).when(sp2).releaseAcquiredRecords(ArgumentMatchers.eq(memberId), ArgumentMatchers.eq(false));
+        when(sp3.releaseAcquiredRecords(ArgumentMatchers.eq(memberId), ArgumentMatchers.eq(false))).thenReturn(CompletableFuture.completedFuture(null));
 
         SharePartitionCache partitionCache = new SharePartitionCache();
         partitionCache.put(new SharePartitionKey(groupId, tp1), sp1);
@@ -2104,15 +2105,15 @@ public class SharePartitionManagerTest {
         doAnswer(invocation -> {
             when(sp1.canAcquireRecords()).thenReturn(true);
             return CompletableFuture.completedFuture(Optional.empty());
-        }).when(sp1).releaseAcquiredRecords(ArgumentMatchers.eq(memberId));
+        }).when(sp1).releaseAcquiredRecords(ArgumentMatchers.eq(memberId), ArgumentMatchers.eq(false));
         doAnswer(invocation -> {
             when(sp2.canAcquireRecords()).thenReturn(true);
             return CompletableFuture.completedFuture(Optional.empty());
-        }).when(sp2).releaseAcquiredRecords(ArgumentMatchers.eq(memberId));
+        }).when(sp2).releaseAcquiredRecords(ArgumentMatchers.eq(memberId), ArgumentMatchers.eq(false));
         doAnswer(invocation -> {
             when(sp3.canAcquireRecords()).thenReturn(true);
             return CompletableFuture.completedFuture(Optional.empty());
-        }).when(sp3).releaseAcquiredRecords(ArgumentMatchers.eq(memberId));
+        }).when(sp3).releaseAcquiredRecords(ArgumentMatchers.eq(memberId), ArgumentMatchers.eq(false));
 
         SharePartitionCache partitionCache = new SharePartitionCache();
         partitionCache.put(new SharePartitionKey(groupId, tp1), sp1);
@@ -3062,6 +3063,45 @@ public class SharePartitionManagerTest {
     }
 
     @Test
+    public void testReleaseSessionAppliesRedeliveryDelayOnlyOnDisconnect() {
+        String groupId = "grp";
+        TopicIdPartition tp0 = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("foo", 0));
+        String memberId1 = Uuid.randomUuid().toString();
+        String memberId2 = Uuid.randomUuid().toString();
+
+        SharePartition sp0 = mock(SharePartition.class);
+        when(sp0.releaseAcquiredRecords(ArgumentMatchers.anyString(), ArgumentMatchers.anyBoolean()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+
+        ImplicitLinkedHashCollection<CachedSharePartition> partitionMap1 = new ImplicitLinkedHashCollection<>();
+        partitionMap1.add(new CachedSharePartition(tp0));
+        ImplicitLinkedHashCollection<CachedSharePartition> partitionMap2 = new ImplicitLinkedHashCollection<>();
+        partitionMap2.add(new CachedSharePartition(tp0));
+        ShareSessionCache cache = new ShareSessionCache(10);
+        cache.maybeCreateSession(groupId, memberId1, partitionMap1, CONNECTION_ID);
+        cache.maybeCreateSession(groupId, memberId2, partitionMap2, "id-2");
+
+        SharePartitionCache partitionCache = new SharePartitionCache();
+        partitionCache.computeIfAbsent(new SharePartitionKey(groupId, tp0), k -> sp0);
+
+        sharePartitionManager = SharePartitionManagerBuilder.builder()
+            .withCache(cache)
+            .withPartitionCache(partitionCache)
+            .withBrokerTopicStats(brokerTopicStats)
+            .build();
+
+        // A client disconnect releases the records with the redelivery delay.
+        cache.connectionDisconnectListener().onDisconnect(CONNECTION_ID);
+        Mockito.verify(sp0, times(1)).releaseAcquiredRecords(memberId1, true);
+        Mockito.verify(sp0, never()).releaseAcquiredRecords(memberId1, false);
+
+        // Closing the share session, with the final epoch, releases the records without the redelivery delay.
+        sharePartitionManager.releaseSession(groupId, memberId2).join();
+        Mockito.verify(sp0, times(1)).releaseAcquiredRecords(memberId2, false);
+        Mockito.verify(sp0, never()).releaseAcquiredRecords(memberId2, true);
+    }
+
+    @Test
     public void testShareGroupListenerWithEmptyCache() {
         String groupId = "grp";
         TopicIdPartition tp0 = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("foo", 0));
@@ -3326,6 +3366,7 @@ public class SharePartitionManagerTest {
         private BrokerTopicStats brokerTopicStats;
         private Supplier<Boolean> shareGroupDlqEnableSupplier = () -> false;
         private ShareGroupDLQManager shareGroupDLQManager = new NoOpShareGroupDLQManager();
+        private int defaultReleaseDelayMs = 0;
 
         private SharePartitionManagerBuilder withReplicaManager(ReplicaManager replicaManager) {
             this.replicaManager = replicaManager;
@@ -3372,6 +3413,11 @@ public class SharePartitionManagerTest {
             return this;
         }
 
+        private SharePartitionManagerBuilder withDefaultReleaseDelayMs(int defaultReleaseDelayMs) {
+            this.defaultReleaseDelayMs = defaultReleaseDelayMs;
+            return this;
+        }
+
         public static SharePartitionManagerBuilder builder() {
             return new SharePartitionManagerBuilder();
         }
@@ -3388,13 +3434,15 @@ public class SharePartitionManagerTest {
                 timer,
                 MAX_DELIVERY_COUNT,
                 MAX_IN_FLIGHT_MESSAGES,
+                defaultReleaseDelayMs,
                 REMOTE_FETCH_MAX_WAIT_MS,
                 persister,
                 new ShareGroupConfigProvider(mock(GroupConfigManager.class)),
                 shareGroupMetrics,
                 brokerTopicStats,
                 shareGroupDlqEnableSupplier,
-                shareGroupDLQManager
+                shareGroupDLQManager,
+                () -> true
             );
         }
     }

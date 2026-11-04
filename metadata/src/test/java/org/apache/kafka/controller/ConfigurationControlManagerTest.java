@@ -35,6 +35,7 @@ import org.apache.kafka.raft.KRaftConfigs;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
 import org.apache.kafka.server.common.EligibleLeaderReplicasVersion;
 import org.apache.kafka.server.common.MetadataVersion;
+import org.apache.kafka.server.common.ShareVersion;
 import org.apache.kafka.server.config.ConfigSynonym;
 import org.apache.kafka.server.config.ServerLogConfigs;
 import org.apache.kafka.server.policy.AlterConfigPolicy;
@@ -70,7 +71,9 @@ import static org.apache.kafka.common.config.ConfigResource.Type.BROKER;
 import static org.apache.kafka.common.config.ConfigResource.Type.TOPIC;
 import static org.apache.kafka.common.metadata.MetadataRecordType.CONFIG_RECORD;
 import static org.apache.kafka.controller.ConfigurationControlManager.DISABLED_CORDONED_LOG_DIRS_ERROR;
+import static org.apache.kafka.controller.ConfigurationControlManager.DISABLED_SHARE_RELEASE_DELAY_ERROR;
 import static org.apache.kafka.controller.ConfigurationControlManager.INVALID_CORDONED_LOG_DIRS_ERROR;
+import static org.apache.kafka.controller.ConfigurationControlManager.SHARE_RELEASE_DELAY_MS_CONFIG;
 import static org.apache.kafka.server.config.ConfigSynonym.HOURS_TO_MILLISECONDS;
 import static org.apache.kafka.server.config.ServerLogConfigs.CORDONED_LOG_DIRS_CONFIG;
 import static org.apache.kafka.server.config.ServerLogConfigs.LOG_DIRS_CONFIG;
@@ -707,6 +710,40 @@ public class ConfigurationControlManagerTest {
                 toMap(entry(ServerLogConfigs.CORDONED_LOG_DIRS_CONFIG, entry(SET, "*"))),
                 true, false);
         assertEquals(enabled ? INVALID_CORDONED_LOG_DIRS_ERROR : DISABLED_CORDONED_LOG_DIRS_ERROR, result.response());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testShareReleaseDelayRequiresShareVersion3(boolean supported) {
+        FeatureControlManager featureManager = new FeatureControlManager.Builder().
+                setQuorumFeatures(new QuorumFeatures(0,
+                        QuorumFeatures.defaultSupportedFeatureMap(true),
+                        () -> Set.of())).
+                setMaxRecordsPerBatch(KRaftConfigs.CONTROLLER_MAX_RECORDS_PER_BATCH_DEFAULT).
+                build();
+        featureManager.replay(new FeatureLevelRecord().
+                setName(MetadataVersion.FEATURE_NAME).
+                setFeatureLevel(MetadataVersion.latestTesting().featureLevel()));
+        featureManager.replay(new FeatureLevelRecord().
+                setName(ShareVersion.FEATURE_NAME).
+                setFeatureLevel(supported ? ShareVersion.SV_3.featureLevel() : ShareVersion.SV_2.featureLevel()));
+        ConfigurationControlManager manager = new ConfigurationControlManager.Builder().
+                setFeatureControl(featureManager).
+                setKafkaConfigSchema(SCHEMA).
+                setMaxRecordsPerBatch(KRaftConfigs.CONTROLLER_MAX_RECORDS_PER_BATCH_DEFAULT).
+                build();
+
+        ConfigResource group = new ConfigResource(ConfigResource.Type.GROUP, "group");
+        ControllerResult<ApiError> result = manager.incrementalAlterConfig(group,
+                toMap(entry(SHARE_RELEASE_DELAY_MS_CONFIG, entry(SET, "5000"))),
+                true, false);
+        assertEquals(supported ? ApiError.NONE : DISABLED_SHARE_RELEASE_DELAY_ERROR, result.response());
+
+        // Removing the configuration is allowed irrespective of the share version.
+        result = manager.incrementalAlterConfig(group,
+                toMap(entry(SHARE_RELEASE_DELAY_MS_CONFIG, entry(DELETE, null))),
+                true, false);
+        assertEquals(ApiError.NONE, result.response());
     }
 
     private FeatureControlManager createFeatureControlManager(short level) {

@@ -30,7 +30,10 @@ public enum AcknowledgeType {
     /** The record was consumed successfully. */
     ACCEPT((byte) 1),
 
-    /** The record was not consumed successfully. Release it for another delivery attempt. */
+    /**
+     * The record was not consumed successfully. Release it for another delivery attempt. If the share group
+     * has a release delay, the record is not available for another delivery attempt until the delay expires.
+     */
     RELEASE((byte) 2),
 
     /** The record was not consumed successfully. Reject it and do not release it for another delivery attempt. */

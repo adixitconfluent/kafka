@@ -58,9 +58,11 @@ import static org.apache.kafka.coordinator.group.GroupCoordinatorConfig.STREAMS_
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MAX_DELIVERY_COUNT_LIMIT_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MAX_PARTITION_MAX_RECORD_LOCKS_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_DEFAULT;
+import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_DELAY_MS_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MIN_DELIVERY_COUNT_LIMIT_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MIN_PARTITION_MAX_RECORD_LOCKS_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MIN_RECORD_LOCK_DURATION_MS_DEFAULT;
+import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MIN_RELEASE_DELAY_MS_DEFAULT;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -105,6 +107,8 @@ public class GroupConfigTest {
                 assertPropertyInvalid(name, "not_a_number", "-0.1", "1.2");
             } else if (GroupConfig.SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG.equals(name)) {
                 assertPropertyInvalid(name, "not_a_number", "-0.1", "1.2");
+            } else if (GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG.equals(name)) {
+                assertPropertyInvalid(name, "not_a_number", "-1", "1.2");
             } else if (GroupConfig.SHARE_AUTO_OFFSET_RESET_CONFIG.equals(name)) {
                 assertPropertyInvalid(name, "hello", "1.0");
             } else if (GroupConfig.SHARE_ISOLATION_LEVEL_CONFIG.equals(name)) {
@@ -472,6 +476,8 @@ public class GroupConfigTest {
                 "share.delivery.count.limit must be in the range 2 to 10 inclusive."),
             Arguments.of(GroupConfig.SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG, "11000",
                 "share.partition.max.record.locks must be in the range 100 to 10000 inclusive."),
+            Arguments.of(GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG, "70000",
+                "share.release.delay.ms must be in the range 0 to 60000 inclusive."),
             Arguments.of(GroupConfig.SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG, "500",
                 "share.assignment.interval.ms must be in the range 1000 to 15000 inclusive."),
             Arguments.of(GroupConfig.SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG, "20000",
@@ -581,6 +587,7 @@ public class GroupConfigTest {
         assertEquals(Optional.empty(), config.shareRecordLockDurationMs());
         assertEquals(Optional.empty(), config.shareDeliveryCountLimit());
         assertEquals(Optional.empty(), config.sharePartitionMaxRecordLocks());
+        assertEquals(Optional.empty(), config.shareReleaseDelayMs());
         assertEquals(Optional.empty(), config.shareAutoOffsetReset());
         assertEquals(Optional.empty(), config.shareAssignmentIntervalMs());
         assertEquals(Optional.empty(), config.shareAssignorOffloadEnable());
@@ -615,6 +622,7 @@ public class GroupConfigTest {
         props.put(GroupConfig.SHARE_RECORD_LOCK_DURATION_MS_CONFIG, "20000");
         props.put(GroupConfig.SHARE_DELIVERY_COUNT_LIMIT_CONFIG, "5");
         props.put(GroupConfig.SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG, "1000");
+        props.put(GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG, "5000");
         props.put(GroupConfig.SHARE_AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(GroupConfig.SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG, "2500");
         props.put(GroupConfig.SHARE_ASSIGNOR_OFFLOAD_ENABLE_CONFIG, "true");
@@ -645,6 +653,7 @@ public class GroupConfigTest {
         assertEquals(Optional.of(20000), config.shareRecordLockDurationMs());
         assertEquals(Optional.of(5), config.shareDeliveryCountLimit());
         assertEquals(Optional.of(1000), config.sharePartitionMaxRecordLocks());
+        assertEquals(Optional.of(5000), config.shareReleaseDelayMs());
         assertEquals(Optional.of(ShareGroupAutoOffsetResetStrategy.EARLIEST), config.shareAutoOffsetReset());
         assertEquals(Optional.of(2500), config.shareAssignmentIntervalMs());
         assertEquals(Optional.of(true), config.shareAssignorOffloadEnable());
@@ -776,6 +785,11 @@ public class GroupConfigTest {
                 GroupConfig.SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG,
                 50, SHARE_GROUP_MIN_PARTITION_MAX_RECORD_LOCKS_DEFAULT,
                 5000, SHARE_GROUP_MAX_PARTITION_MAX_RECORD_LOCKS_DEFAULT
+            ),
+            Arguments.of(
+                GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG,
+                -1, SHARE_GROUP_MIN_RELEASE_DELAY_MS_DEFAULT,
+                70000, SHARE_GROUP_MAX_RELEASE_DELAY_MS_DEFAULT
             ),
             Arguments.of(
                 GroupConfig.SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG,
