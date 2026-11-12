@@ -31,7 +31,6 @@ import org.apache.kafka.server.common.EligibleLeaderReplicasVersion;
 import org.apache.kafka.server.common.Feature;
 import org.apache.kafka.server.common.KRaftVersion;
 import org.apache.kafka.server.common.MetadataVersion;
-import org.apache.kafka.server.common.ShareVersion;
 import org.apache.kafka.server.mutable.BoundedList;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
@@ -493,10 +492,5 @@ public class FeatureControlManager {
     boolean isElrFeatureEnabled() {
         return finalizedVersions.getOrDefault(EligibleLeaderReplicasVersion.FEATURE_NAME, (short) 0) >=
             EligibleLeaderReplicasVersion.ELRV_1.featureLevel();
-    }
-
-    boolean isShareGroupRedeliveryDelayEnabled() {
-        return finalizedVersions.getOrDefault(ShareVersion.FEATURE_NAME, (short) 0) >=
-            ShareVersion.SV_3.featureLevel();
     }
 }

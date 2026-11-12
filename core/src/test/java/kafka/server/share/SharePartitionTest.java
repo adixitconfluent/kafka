@@ -54,6 +54,7 @@ import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.coordinator.group.GroupConfig;
 import org.apache.kafka.coordinator.group.GroupConfigManager;
 import org.apache.kafka.coordinator.group.ShareGroupAutoOffsetResetStrategy;
+import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig;
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfigProvider;
 import org.apache.kafka.server.share.PartitionMetadataProvider;
 import org.apache.kafka.server.share.acknowledge.ShareAcknowledgementBatch;
@@ -13727,6 +13728,7 @@ public class SharePartitionTest {
         // The gauges are registered on construction; with no in-flight records their value is 0.
         assertEquals(0, yammerMetricValue(SharePartitionMetrics.IN_FLIGHT_MESSAGE_COUNT).intValue());
         assertEquals(0, yammerMetricValue(SharePartitionMetrics.IN_FLIGHT_BATCH_COUNT).intValue());
+        assertEquals(0, yammerMetricValue(SharePartitionMetrics.REDELIVERY_DELAYED_RECORD_COUNT).intValue());
 
         sharePartition.markFenced();
         assertEquals(SharePartitionState.FENCED, sharePartition.partitionState());
@@ -13735,6 +13737,7 @@ public class SharePartitionTest {
         // close must deregister the metrics so the registry no longer references the partition.
         assertThrows(NoSuchElementException.class, () -> yammerMetricValue(SharePartitionMetrics.IN_FLIGHT_MESSAGE_COUNT));
         assertThrows(NoSuchElementException.class, () -> yammerMetricValue(SharePartitionMetrics.IN_FLIGHT_BATCH_COUNT));
+        assertThrows(NoSuchElementException.class, () -> yammerMetricValue(SharePartitionMetrics.REDELIVERY_DELAYED_RECORD_COUNT));
 
         // close must be idempotent - a second call should not throw even though the metrics are gone.
         assertDoesNotThrow(sharePartition::close);
@@ -13754,6 +13757,7 @@ public class SharePartitionTest {
         sharePartition.close();
         assertThrows(NoSuchElementException.class, () -> yammerMetricValue(SharePartitionMetrics.IN_FLIGHT_MESSAGE_COUNT));
         assertThrows(NoSuchElementException.class, () -> yammerMetricValue(SharePartitionMetrics.IN_FLIGHT_BATCH_COUNT));
+        assertThrows(NoSuchElementException.class, () -> yammerMetricValue(SharePartitionMetrics.REDELIVERY_DELAYED_RECORD_COUNT));
     }
 
     @Test
@@ -13761,7 +13765,7 @@ public class SharePartitionTest {
         Consumer<DelayedShareFetchKey> delayedRequestNotifier = Mockito.mock(Consumer.class);
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .withDelayedRequestNotifier(delayedRequestNotifier)
             .build();
         MemoryRecords records = memoryRecords(5, 10);
@@ -13803,7 +13807,7 @@ public class SharePartitionTest {
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
             .withDefaultAcquisitionLockTimeoutMs(ACQUISITION_LOCK_TIMEOUT_MS)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .build();
         MemoryRecords records = memoryRecords(5, 10);
         fetchAcquiredRecords(sharePartition, records, 10);
@@ -13828,7 +13832,7 @@ public class SharePartitionTest {
     public void testReleaseAcquiredRecordsAppliesRedeliveryDelayOnlyWhenRequested() throws InterruptedException {
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .build();
         fetchAcquiredRecords(sharePartition, memoryRecords(5, 10), 10);
 
@@ -13862,7 +13866,7 @@ public class SharePartitionTest {
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
             .withMaxDeliveryCount(2)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .build();
         MemoryRecords records = memoryRecords(5, 10);
         fetchAcquiredRecords(sharePartition, records, 10);
@@ -13880,11 +13884,10 @@ public class SharePartitionTest {
     }
 
     @Test
-    public void testRedeliveryDelayNotAppliedWhenNotSupported() {
+    public void testRedeliveryDelayNotAppliedWithoutReleaseBackoff() {
+        // The release backoff of a share group is 0 by default, hence released records are available immediately.
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
-            .withDefaultReleaseDelayMs(1000)
-            .withShareGroupRedeliveryDelayEnableSupplier(() -> false)
             .build();
         MemoryRecords records = memoryRecords(5, 10);
         fetchAcquiredRecords(sharePartition, records, 10);
@@ -13899,11 +13902,11 @@ public class SharePartitionTest {
     }
 
     @Test
-    public void testGroupReleaseDelayOverridesDefaultAndChangeDoesNotAffectScheduledDelay() throws InterruptedException {
+    public void testReleaseBackoffChangeDoesNotAffectScheduledDelay() throws InterruptedException {
         GroupConfigManager groupConfigManager = Mockito.mock(GroupConfigManager.class);
         GroupConfig groupConfig = Mockito.mock(GroupConfig.class);
         Mockito.when(groupConfigManager.groupConfig(GROUP_ID)).thenReturn(Optional.of(groupConfig));
-        Mockito.when(groupConfig.shareReleaseDelayMs()).thenReturn(Optional.of(2000));
+        Mockito.when(groupConfig.shareReleaseBackoffMs()).thenReturn(Optional.of(2000));
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
             .withConfigProvider(new ShareGroupConfigProvider(groupConfigManager))
@@ -13915,7 +13918,7 @@ public class SharePartitionTest {
         assertNotNull(inFlightBatch.batchRedeliveryDelayTask());
 
         // Lowering the delay does not change the delay which is already scheduled.
-        Mockito.when(groupConfig.shareReleaseDelayMs()).thenReturn(Optional.of(500));
+        Mockito.when(groupConfig.shareReleaseBackoffMs()).thenReturn(Optional.of(500));
         mockTimer.advanceClock(1001);
         assertNotNull(inFlightBatch.batchRedeliveryDelayTask());
         mockTimer.advanceClock(1000);
@@ -13927,7 +13930,7 @@ public class SharePartitionTest {
     public void testRedeliveryDelayRetainedWhenBatchSplitOnLsoMovement() throws InterruptedException {
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .build();
         fetchAcquiredRecords(sharePartition, memoryRecords(5, 10), 10);
         assertNull(sharePartition.acknowledge(MEMBER_ID,
@@ -13964,7 +13967,7 @@ public class SharePartitionTest {
     public void testRedeliveryDelayTaskIsSharedByContiguousOffsetsWithSameDeliveryCount() {
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .build();
         fetchAcquiredRecords(sharePartition, memoryRecords(5, 5), 5);
 
@@ -13990,7 +13993,7 @@ public class SharePartitionTest {
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
             .withMaxInflightRecords(10)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .build();
         fetchAcquiredRecords(sharePartition, memoryRecords(0, 5), 5);
         fetchAcquiredRecords(sharePartition, memoryRecords(5, 5), 5);
@@ -14016,7 +14019,7 @@ public class SharePartitionTest {
             .withState(SharePartitionState.ACTIVE)
             .withPersister(persister)
             .withDefaultAcquisitionLockTimeoutMs(ACQUISITION_LOCK_TIMEOUT_MS)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .build();
         fetchAcquiredRecords(sharePartition, memoryRecords(5, 10), 10);
 
@@ -14051,7 +14054,7 @@ public class SharePartitionTest {
         Consumer<DelayedShareFetchKey> delayedRequestNotifier = Mockito.mock(Consumer.class);
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .withDelayedRequestNotifier(delayedRequestNotifier)
             .build();
         fetchAcquiredRecords(sharePartition, memoryRecords(5, 10), 10);
@@ -14070,7 +14073,7 @@ public class SharePartitionTest {
     public void testReleaseDuringRedeliveryDelayFails() {
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .build();
         fetchAcquiredRecords(sharePartition, memoryRecords(5, 10), 10);
         assertNull(sharePartition.acknowledge(MEMBER_ID,
@@ -14088,7 +14091,7 @@ public class SharePartitionTest {
         Consumer<DelayedShareFetchKey> delayedRequestNotifier = Mockito.mock(Consumer.class);
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withState(SharePartitionState.ACTIVE)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .withDelayedRequestNotifier(delayedRequestNotifier)
             .build();
         fetchAcquiredRecords(sharePartition, memoryRecords(5, 10), 10);
@@ -14130,7 +14133,7 @@ public class SharePartitionTest {
         Mockito.when(persister.writeState(Mockito.any())).thenReturn(CompletableFuture.completedFuture(writeShareGroupStateResult));
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withPersister(persister)
-            .withDefaultReleaseDelayMs(1000)
+            .withReleaseBackoffMs(1000)
             .build();
 
         CompletableFuture<Void> result = sharePartition.maybeInitialize();
@@ -14153,6 +14156,164 @@ public class SharePartitionTest {
         assertArrayEquals(expectedAcquiredRecords.toArray(), acquiredRecordsList.toArray());
         assertEquals(RecordState.AVAILABLE, delayedBatch.batchState());
         assertNotNull(delayedBatch.batchRedeliveryDelayTask());
+    }
+
+    @Test
+    public void testRedeliveryDelayMsWithoutReleaseBackoff() {
+        // The release backoff of a share group is 0 by default, and exponential backoff alone adds no delay.
+        assertEquals(0, SharePartitionBuilder.builder().build().redeliveryDelayMs(1));
+        SharePartition sharePartition = SharePartitionBuilder.builder()
+            .withGroupConfig(Map.of(GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG, "true"))
+            .build();
+        assertEquals(0, sharePartition.redeliveryDelayMs(3));
+    }
+
+    @Test
+    public void testRedeliveryDelayMsWithFixedReleaseBackoff() {
+        // Without exponential backoff, every delay is the release backoff, without jitter, and the maximum is not used.
+        SharePartition sharePartition = SharePartitionBuilder.builder()
+            .withGroupConfig(Map.of(
+                GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "1500",
+                GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, "1000"))
+            .build();
+        for (int deliveryCount = 1; deliveryCount <= 5; deliveryCount++) {
+            assertEquals(1500, sharePartition.redeliveryDelayMs(deliveryCount));
+        }
+    }
+
+    @Test
+    public void testRedeliveryDelayMsWithExponentialReleaseBackoff() {
+        SharePartition sharePartition = SharePartitionBuilder.builder()
+            .withGroupConfig(Map.of(
+                GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "1000",
+                GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG, "true",
+                GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, "8000"))
+            .build();
+        // The delay before jitter doubles with each delivery attempt, up to the maximum.
+        long[] backoffMs = {1000, 2000, 4000, 8000, 8000, 8000};
+        for (int i = 0; i < 100; i++) {
+            for (int deliveryCount = 1; deliveryCount <= backoffMs.length; deliveryCount++) {
+                assertDelayWithinJitter(backoffMs[deliveryCount - 1], 8000, sharePartition.redeliveryDelayMs(deliveryCount));
+            }
+        }
+    }
+
+    @Test
+    public void testRedeliveryDelayMsWithExponentialReleaseBackoffAtLeastMaximum() {
+        // If the release backoff is at least the maximum, every delay is the maximum, without jitter.
+        for (String releaseBackoffMs : List.of("5000", "2000")) {
+            SharePartition sharePartition = SharePartitionBuilder.builder()
+                .withGroupConfig(Map.of(
+                    GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, releaseBackoffMs,
+                    GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG, "true",
+                    GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, "2000"))
+                .build();
+            for (int deliveryCount = 1; deliveryCount <= 5; deliveryCount++) {
+                assertEquals(2000, sharePartition.redeliveryDelayMs(deliveryCount));
+            }
+        }
+    }
+
+    @Test
+    public void testRedeliveryDelayMsMaximumDefaultsToBrokerMaximum() {
+        // A share group which does not set the maximum release backoff uses the broker's upper bound.
+        SharePartition sharePartition = SharePartitionBuilder.builder()
+            .withDefaultReleaseBackoffMaxMs(3000)
+            .withGroupConfig(Map.of(
+                GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "1000",
+                GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG, "true"))
+            .build();
+        long[] backoffMs = {1000, 2000, 3000, 3000};
+        for (int deliveryCount = 1; deliveryCount <= backoffMs.length; deliveryCount++) {
+            assertDelayWithinJitter(backoffMs[deliveryCount - 1], 3000, sharePartition.redeliveryDelayMs(deliveryCount));
+        }
+    }
+
+    @Test
+    public void testExponentialReleaseBackoffGrowsWithDeliveryCount() throws InterruptedException {
+        SharePartition sharePartition = SharePartitionBuilder.builder()
+            .withState(SharePartitionState.ACTIVE)
+            .withMaxDeliveryCount(10)
+            .withGroupConfig(Map.of(
+                GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "1000",
+                GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG, "true",
+                GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, "4000"))
+            .build();
+        MemoryRecords records = memoryRecords(5, 10);
+        // The delay after a delivery attempt depends on the delivery count of that attempt.
+        long[] backoffMs = {1000, 2000, 4000, 4000};
+        for (int deliveryCount = 1; deliveryCount <= backoffMs.length; deliveryCount++) {
+            List<AcquiredRecords> acquiredRecordsList = fetchAcquiredRecords(sharePartition, records, 10);
+            assertArrayEquals(expectedAcquiredRecord(5, 14, deliveryCount).toArray(), acquiredRecordsList.toArray());
+            assertNull(sharePartition.acknowledge(MEMBER_ID,
+                List.of(new ShareAcknowledgementBatch(5, 14, List.of(AcknowledgeType.RELEASE.id)))).join());
+
+            RedeliveryDelayTimerTask delayTask = sharePartition.cachedState().get(5L).batchRedeliveryDelayTask();
+            assertNotNull(delayTask);
+            assertDelayWithinJitter(backoffMs[deliveryCount - 1], 4000, delayTask.delayMs);
+            fetchAcquiredRecords(sharePartition, records, 0);
+
+            mockTimer.advanceClock(delayTask.delayMs + 1);
+            assertNull(sharePartition.cachedState().get(5L).batchRedeliveryDelayTask());
+        }
+    }
+
+    @Test
+    public void testRedeliveryDelayedRecordCountMetric() throws InterruptedException {
+        SharePartition sharePartition = SharePartitionBuilder.builder()
+            .withState(SharePartitionState.ACTIVE)
+            .withReleaseBackoffMs(1000)
+            .withSharePartitionMetrics(sharePartitionMetrics)
+            .build();
+        assertEquals(0, yammerMetricValue(SharePartitionMetrics.REDELIVERY_DELAYED_RECORD_COUNT).intValue());
+
+        // Release offsets 5-9 and accept offsets 10-14, hence the state of each offset is tracked.
+        fetchAcquiredRecords(sharePartition, memoryRecords(5, 10), 10);
+        assertNull(sharePartition.acknowledge(MEMBER_ID, List.of(new ShareAcknowledgementBatch(5, 14, List.of(
+            AcknowledgeType.RELEASE.id, AcknowledgeType.RELEASE.id, AcknowledgeType.RELEASE.id, AcknowledgeType.RELEASE.id,
+            AcknowledgeType.RELEASE.id, AcknowledgeType.ACCEPT.id, AcknowledgeType.ACCEPT.id, AcknowledgeType.ACCEPT.id,
+            AcknowledgeType.ACCEPT.id, AcknowledgeType.ACCEPT.id)))).join());
+        assertEquals(5, sharePartition.numRedeliveryDelayedRecords());
+
+        // Release a complete batch.
+        fetchAcquiredRecords(sharePartition, memoryRecords(15, 5), 5);
+        assertNull(sharePartition.acknowledge(MEMBER_ID,
+            List.of(new ShareAcknowledgementBatch(15, 19, List.of(AcknowledgeType.RELEASE.id)))).join());
+        assertEquals(10, sharePartition.numRedeliveryDelayedRecords());
+        assertEquals(10, yammerMetricValue(SharePartitionMetrics.REDELIVERY_DELAYED_RECORD_COUNT).intValue());
+
+        // Once the delays expire, no records are waiting for a redelivery delay.
+        mockTimer.advanceClock(1001);
+        assertEquals(0, sharePartition.numRedeliveryDelayedRecords());
+        assertEquals(0, yammerMetricValue(SharePartitionMetrics.REDELIVERY_DELAYED_RECORD_COUNT).intValue());
+    }
+
+    @Test
+    public void testRedeliveryDelayedRecordCountExcludesArchivedRecords() throws InterruptedException {
+        SharePartition sharePartition = SharePartitionBuilder.builder()
+            .withState(SharePartitionState.ACTIVE)
+            .withReleaseBackoffMs(1000)
+            .build();
+        fetchAcquiredRecords(sharePartition, memoryRecords(5, 10), 10);
+        assertNull(sharePartition.acknowledge(MEMBER_ID,
+            List.of(new ShareAcknowledgementBatch(5, 14, List.of(AcknowledgeType.RELEASE.id)))).join());
+        assertEquals(10, sharePartition.numRedeliveryDelayedRecords());
+
+        // The log start offset moves into the delayed batch, which archives offsets 5-9.
+        sharePartition.updateCacheAndOffsets(10);
+        assertEquals(5, sharePartition.numRedeliveryDelayedRecords());
+
+        // Once the delay expires, no records are waiting and the remaining records are acquired.
+        mockTimer.advanceClock(1001);
+        assertEquals(0, sharePartition.numRedeliveryDelayedRecords());
+        fetchAcquiredRecords(sharePartition, memoryRecords(10, 5), 5);
+    }
+
+    private static void assertDelayWithinJitter(long backoffMs, long maxBackoffMs, long delayMs) {
+        // The jitter is a random factor between 0.8 and 1.2, and the delay never exceeds the maximum. The lower
+        // bound allows for rounding of the floating-point arithmetic.
+        assertTrue(delayMs >= (long) (backoffMs * 0.8) - 1 && delayMs <= Math.min((long) (backoffMs * 1.2), maxBackoffMs),
+            "Delay " + delayMs + " ms is not within the jitter range of " + backoffMs + " ms");
     }
 
     private static ShareGroupDLQManager mockDlqManager() {
@@ -14211,8 +14372,7 @@ public class SharePartitionTest {
         private SharePartitionMetrics sharePartitionMetrics = Mockito.mock(SharePartitionMetrics.class);
         private Supplier<Boolean> shareGroupDlqEnableSupplier = () -> false;
         private ShareGroupDLQManager shareGroupDLQManager = new NoOpShareGroupDLQManager();
-        private int defaultReleaseDelayMs = 0;
-        private Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier = () -> true;
+        private int defaultReleaseBackoffMaxMs = ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT;
 
         private SharePartitionBuilder withMaxInflightRecords(int defaultMaxInflightRecords) {
             this.defaultMaxInflightRecords = defaultMaxInflightRecords;
@@ -14274,14 +14434,20 @@ public class SharePartitionTest {
             return this;
         }
 
-        private SharePartitionBuilder withDefaultReleaseDelayMs(int defaultReleaseDelayMs) {
-            this.defaultReleaseDelayMs = defaultReleaseDelayMs;
+        private SharePartitionBuilder withDefaultReleaseBackoffMaxMs(int defaultReleaseBackoffMaxMs) {
+            this.defaultReleaseBackoffMaxMs = defaultReleaseBackoffMaxMs;
             return this;
         }
 
-        private SharePartitionBuilder withShareGroupRedeliveryDelayEnableSupplier(Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier) {
-            this.shareGroupRedeliveryDelayEnableSupplier = shareGroupRedeliveryDelayEnableSupplier;
+        private SharePartitionBuilder withGroupConfig(Map<String, String> groupConfig) {
+            GroupConfigManager groupConfigManager = Mockito.mock(GroupConfigManager.class);
+            Mockito.when(groupConfigManager.groupConfig(GROUP_ID)).thenReturn(Optional.of(new GroupConfig(groupConfig)));
+            this.configProvider = new ShareGroupConfigProvider(groupConfigManager);
             return this;
+        }
+
+        private SharePartitionBuilder withReleaseBackoffMs(int releaseBackoffMs) {
+            return withGroupConfig(Map.of(GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, String.valueOf(releaseBackoffMs)));
         }
 
         public static SharePartitionBuilder builder() {
@@ -14290,9 +14456,9 @@ public class SharePartitionTest {
 
         public SharePartition build() {
             return new SharePartition(GROUP_ID, TOPIC_ID_PARTITION, 0, defaultMaxInflightRecords, defaultMaxDeliveryCount,
-                defaultAcquisitionLockTimeoutMs, defaultReleaseDelayMs, mockTimer, time, persister, metadataProvider,
+                defaultAcquisitionLockTimeoutMs, defaultReleaseBackoffMaxMs, mockTimer, time, persister, metadataProvider,
                 delayedRequestNotifier, configProvider, state, Mockito.mock(SharePartitionListener.class), sharePartitionMetrics,
-                shareGroupDlqEnableSupplier, shareGroupDLQManager, shareGroupRedeliveryDelayEnableSupplier);
+                shareGroupDlqEnableSupplier, shareGroupDLQManager);
         }
     }
 }

@@ -247,9 +247,11 @@ import static org.apache.kafka.common.utils.Utils.propsToMap;
  * the bad records are rejected meaning that they’re not eligible for further delivery attempts. For a permanent error
  * such as a semantic error, this is appropriate. For a transient error which might not affect a subsequent processing
  * attempt, {@link AcknowledgeType#RELEASE} is more appropriate because the record remains eligible for further delivery attempts.
- * The group configuration property {@code share.release.delay.ms} can be used to delay the next delivery attempt of a
- * released record, for example to give a failing downstream system time to recover. The delay also applies when the
- * acquisition lock of a record times out, or when the consumer holding the record disconnects without closing.
+ * The group configuration property {@code share.release.backoff.ms} can be used to delay the next delivery attempt of a
+ * released record, for example to give a failing downstream system time to recover. If the group configuration property
+ * {@code share.release.backoff.exponential.enable} is true, the delay doubles with each delivery attempt, up to
+ * {@code share.release.backoff.max.ms}. The delay also applies when the acquisition lock of a record times out, or when
+ * the consumer holding the record disconnects without closing.
  * <p>
  * The calls to {@link #acknowledge(ConsumerRecord, AcknowledgeType)} are simply updating local information in the consumer.
  * It is only once {@link #commitSync()} is called that the acknowledgements are committed by sending the new state

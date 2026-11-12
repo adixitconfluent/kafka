@@ -481,15 +481,14 @@ class BrokerServer(
         config.shareGroupConfig.shareGroupRecordLockDurationMs,
         config.shareGroupConfig.shareGroupDeliveryCountLimit,
         config.shareGroupConfig.shareGroupPartitionMaxRecordLocks,
-        config.shareGroupConfig.shareGroupReleaseDelayMs,
+        config.shareGroupConfig.shareGroupMaxReleaseBackoffMs,
         config.remoteLogManagerConfig.remoteFetchMaxWaitMs().toLong,
         persister,
         new ShareGroupConfigProvider(groupConfigManager),
         shareGroupMetrics,
         brokerTopicStats,
         () => ShareVersion.fromFeatureLevel(metadataCache.features.finalizedFeatures.getOrDefault(ShareVersion.FEATURE_NAME, 0.toShort)).supportsShareGroupDLQ(),
-        shareGroupDLQManager,
-        () => ShareVersion.fromFeatureLevel(metadataCache.features.finalizedFeatures.getOrDefault(ShareVersion.FEATURE_NAME, 0.toShort)).supportsShareGroupRedeliveryDelay()
+        shareGroupDLQManager
       )
 
       dataPlaneRequestProcessor = new KafkaApis(

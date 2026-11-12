@@ -22,6 +22,7 @@ import org.apache.kafka.coordinator.group.ShareGroupAutoOffsetResetStrategy;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -94,23 +95,41 @@ public class ShareGroupConfigProviderTest {
     }
 
     @Test
-    void testReleaseDelayMsOrDefaultWithGroupConfig() {
+    void testReleaseBackoffWithGroupConfig() {
         GroupConfigManager groupConfigManager = mock(GroupConfigManager.class);
         GroupConfig groupConfig = mock(GroupConfig.class);
-        when(groupConfig.shareReleaseDelayMs()).thenReturn(Optional.of(5000));
+        when(groupConfig.shareReleaseBackoffMs()).thenReturn(Optional.of(5000));
+        when(groupConfig.shareReleaseBackoffExponentialEnable()).thenReturn(Optional.of(true));
+        when(groupConfig.shareReleaseBackoffMaxMs()).thenReturn(Optional.of(30000));
         when(groupConfigManager.groupConfig("test-group")).thenReturn(Optional.of(groupConfig));
         provider = new ShareGroupConfigProvider(groupConfigManager);
 
-        assertEquals(5000, provider.releaseDelayMsOrDefault("test-group", 0));
+        assertEquals(5000, provider.releaseBackoffMs("test-group"));
+        assertTrue(provider.isReleaseBackoffExponentialEnabled("test-group"));
+        assertEquals(30000, provider.releaseBackoffMaxMsOrDefault("test-group", 60000));
     }
 
     @Test
-    void testReleaseDelayMsOrDefaultWithoutGroupConfig() {
+    void testReleaseBackoffWithoutGroupConfig() {
         GroupConfigManager groupConfigManager = mock(GroupConfigManager.class);
         when(groupConfigManager.groupConfig("test-group")).thenReturn(Optional.empty());
         provider = new ShareGroupConfigProvider(groupConfigManager);
 
-        assertEquals(1000, provider.releaseDelayMsOrDefault("test-group", 1000));
+        assertEquals(GroupConfig.SHARE_RELEASE_BACKOFF_MS_DEFAULT, provider.releaseBackoffMs("test-group"));
+        assertFalse(provider.isReleaseBackoffExponentialEnabled("test-group"));
+        assertEquals(60000, provider.releaseBackoffMaxMsOrDefault("test-group", 60000));
+    }
+
+    @Test
+    void testReleaseBackoffWithGroupConfigNotSettingIt() {
+        GroupConfigManager groupConfigManager = mock(GroupConfigManager.class);
+        when(groupConfigManager.groupConfig("test-group")).thenReturn(Optional.of(
+            new GroupConfig(Map.of(GroupConfig.SHARE_DELIVERY_COUNT_LIMIT_CONFIG, "5"))));
+        provider = new ShareGroupConfigProvider(groupConfigManager);
+
+        assertEquals(GroupConfig.SHARE_RELEASE_BACKOFF_MS_DEFAULT, provider.releaseBackoffMs("test-group"));
+        assertFalse(provider.isReleaseBackoffExponentialEnabled("test-group"));
+        assertEquals(20000, provider.releaseBackoffMaxMsOrDefault("test-group", 20000));
     }
 
     @Test

@@ -69,20 +69,11 @@ public class ShareGroupConfig {
     public static final int SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_DEFAULT = 60000;
     public static final String SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_DOC = "The maximum value of a group configuration for record acquisition lock duration in milliseconds.";
 
-    public static final String SHARE_GROUP_RELEASE_DELAY_MS_CONFIG = "group.share.release.delay.ms";
-    public static final int SHARE_GROUP_RELEASE_DELAY_MS_DEFAULT = 0;
-    public static final String SHARE_GROUP_RELEASE_DELAY_MS_DOC = "The delay in milliseconds before a record delivered to a share group becomes " +
-        "available for another delivery attempt after it is released by a consumer, its acquisition lock times out, or the consumer " +
-        "holding it disconnects. The delay does not apply when a consumer closes gracefully, or when the record reaches the delivery " +
-        "count limit. A value of 0 makes such records available immediately.";
-
-    public static final String SHARE_GROUP_MIN_RELEASE_DELAY_MS_CONFIG = "group.share.min.release.delay.ms";
-    public static final int SHARE_GROUP_MIN_RELEASE_DELAY_MS_DEFAULT = 0;
-    public static final String SHARE_GROUP_MIN_RELEASE_DELAY_MS_DOC = "The minimum value of a group configuration for the release delay in milliseconds.";
-
-    public static final String SHARE_GROUP_MAX_RELEASE_DELAY_MS_CONFIG = "group.share.max.release.delay.ms";
-    public static final int SHARE_GROUP_MAX_RELEASE_DELAY_MS_DEFAULT = 60000;
-    public static final String SHARE_GROUP_MAX_RELEASE_DELAY_MS_DOC = "The maximum value of a group configuration for the release delay in milliseconds.";
+    public static final String SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG = "group.share.max.release.backoff.ms";
+    public static final int SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT = 60000;
+    public static final String SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DOC = "The maximum value of the group configurations share.release.backoff.ms " +
+        "and share.release.backoff.max.ms in milliseconds, and so the longest delay before a record delivered to a share group is " +
+        "delivered again. It is also the default of share.release.backoff.max.ms. A value of 0 turns off the delay for all share groups.";
 
     public static final String SHARE_FETCH_PURGATORY_PURGE_INTERVAL_REQUESTS_CONFIG = "share.fetch.purgatory.purge.interval.requests";
     public static final int SHARE_FETCH_PURGATORY_PURGE_INTERVAL_REQUESTS_DEFAULT = 1000;
@@ -109,9 +100,7 @@ public class ShareGroupConfig {
             .define(SHARE_GROUP_RECORD_LOCK_DURATION_MS_CONFIG, INT, SHARE_GROUP_RECORD_LOCK_DURATION_MS_DEFAULT, between(1000, 3600000), MEDIUM, SHARE_GROUP_RECORD_LOCK_DURATION_MS_DOC)
             .define(SHARE_GROUP_MIN_RECORD_LOCK_DURATION_MS_CONFIG, INT, SHARE_GROUP_MIN_RECORD_LOCK_DURATION_MS_DEFAULT, between(1000, 30000), MEDIUM, SHARE_GROUP_MIN_RECORD_LOCK_DURATION_MS_DOC)
             .define(SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_CONFIG, INT, SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_DEFAULT, between(30000, 3600000), MEDIUM, SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_DOC)
-            .define(SHARE_GROUP_RELEASE_DELAY_MS_CONFIG, INT, SHARE_GROUP_RELEASE_DELAY_MS_DEFAULT, between(0, 3600000), MEDIUM, SHARE_GROUP_RELEASE_DELAY_MS_DOC)
-            .define(SHARE_GROUP_MIN_RELEASE_DELAY_MS_CONFIG, INT, SHARE_GROUP_MIN_RELEASE_DELAY_MS_DEFAULT, between(0, 60000), MEDIUM, SHARE_GROUP_MIN_RELEASE_DELAY_MS_DOC)
-            .define(SHARE_GROUP_MAX_RELEASE_DELAY_MS_CONFIG, INT, SHARE_GROUP_MAX_RELEASE_DELAY_MS_DEFAULT, between(1000, 3600000), MEDIUM, SHARE_GROUP_MAX_RELEASE_DELAY_MS_DOC)
+            .define(SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG, INT, SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT, between(0, 3600000), MEDIUM, SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DOC)
             .define(SHARE_GROUP_PARTITION_MAX_RECORD_LOCKS_CONFIG, INT, SHARE_GROUP_PARTITION_MAX_RECORD_LOCKS_DEFAULT, between(100, 10000), MEDIUM, SHARE_GROUP_PARTITION_MAX_RECORD_LOCKS_DOC)
             .define(SHARE_GROUP_MAX_PARTITION_MAX_RECORD_LOCKS_CONFIG, INT, SHARE_GROUP_MAX_PARTITION_MAX_RECORD_LOCKS_DEFAULT, between(2000, 10000), MEDIUM, SHARE_GROUP_MAX_PARTITION_MAX_RECORD_LOCKS_DOC)
             .define(SHARE_GROUP_MIN_PARTITION_MAX_RECORD_LOCKS_CONFIG, INT, SHARE_GROUP_MIN_PARTITION_MAX_RECORD_LOCKS_DEFAULT, between(100, 2000), MEDIUM, SHARE_GROUP_MIN_PARTITION_MAX_RECORD_LOCKS_DOC)
@@ -129,9 +118,7 @@ public class ShareGroupConfig {
     private final int shareGroupRecordLockDurationMs;
     private final int shareGroupMaxRecordLockDurationMs;
     private final int shareGroupMinRecordLockDurationMs;
-    private final int shareGroupReleaseDelayMs;
-    private final int shareGroupMinReleaseDelayMs;
-    private final int shareGroupMaxReleaseDelayMs;
+    private final int shareGroupMaxReleaseBackoffMs;
     private final int shareFetchPurgatoryPurgeIntervalRequests;
     private final int shareGroupMaxShareSessions;
     private final String shareGroupPersisterClassName;
@@ -149,9 +136,7 @@ public class ShareGroupConfig {
         shareGroupRecordLockDurationMs = config.getInt(ShareGroupConfig.SHARE_GROUP_RECORD_LOCK_DURATION_MS_CONFIG);
         shareGroupMaxRecordLockDurationMs = config.getInt(ShareGroupConfig.SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_CONFIG);
         shareGroupMinRecordLockDurationMs = config.getInt(ShareGroupConfig.SHARE_GROUP_MIN_RECORD_LOCK_DURATION_MS_CONFIG);
-        shareGroupReleaseDelayMs = config.getInt(ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_CONFIG);
-        shareGroupMinReleaseDelayMs = config.getInt(ShareGroupConfig.SHARE_GROUP_MIN_RELEASE_DELAY_MS_CONFIG);
-        shareGroupMaxReleaseDelayMs = config.getInt(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_DELAY_MS_CONFIG);
+        shareGroupMaxReleaseBackoffMs = config.getInt(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG);
         shareFetchPurgatoryPurgeIntervalRequests = config.getInt(ShareGroupConfig.SHARE_FETCH_PURGATORY_PURGE_INTERVAL_REQUESTS_CONFIG);
         shareGroupMaxShareSessions = config.getInt(ShareGroupConfig.SHARE_GROUP_MAX_SHARE_SESSIONS_CONFIG);
         shareGroupPersisterClassName = config.getString(ShareGroupConfig.SHARE_GROUP_PERSISTER_CLASS_NAME_CONFIG);
@@ -206,16 +191,8 @@ public class ShareGroupConfig {
         return shareGroupMinRecordLockDurationMs;
     }
 
-    public int shareGroupReleaseDelayMs() {
-        return shareGroupReleaseDelayMs;
-    }
-
-    public int shareGroupMinReleaseDelayMs() {
-        return shareGroupMinReleaseDelayMs;
-    }
-
-    public int shareGroupMaxReleaseDelayMs() {
-        return shareGroupMaxReleaseDelayMs;
+    public int shareGroupMaxReleaseBackoffMs() {
+        return shareGroupMaxReleaseBackoffMs;
     }
 
     public int shareFetchPurgatoryPurgeIntervalRequests() {
@@ -253,12 +230,6 @@ public class ShareGroupConfig {
         Utils.require(shareGroupMaxRecordLockDurationMs >= shareGroupRecordLockDurationMs,
                 String.format("%s must be greater than or equal to %s",
                         SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_CONFIG, SHARE_GROUP_RECORD_LOCK_DURATION_MS_CONFIG));
-        Utils.require(shareGroupReleaseDelayMs >= shareGroupMinReleaseDelayMs,
-                String.format("%s must be greater than or equal to %s",
-                        SHARE_GROUP_RELEASE_DELAY_MS_CONFIG, SHARE_GROUP_MIN_RELEASE_DELAY_MS_CONFIG));
-        Utils.require(shareGroupMaxReleaseDelayMs >= shareGroupReleaseDelayMs,
-                String.format("%s must be greater than or equal to %s",
-                        SHARE_GROUP_MAX_RELEASE_DELAY_MS_CONFIG, SHARE_GROUP_RELEASE_DELAY_MS_CONFIG));
         Utils.require(shareGroupMaxShareSessions >= config.getInt(GroupCoordinatorConfig.SHARE_GROUP_MAX_SIZE_CONFIG),
                 String.format("%s must be greater than or equal to %s",
                         SHARE_GROUP_MAX_SHARE_SESSIONS_CONFIG, GroupCoordinatorConfig.SHARE_GROUP_MAX_SIZE_CONFIG));

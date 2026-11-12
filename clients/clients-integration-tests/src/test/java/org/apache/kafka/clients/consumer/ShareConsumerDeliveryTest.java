@@ -29,12 +29,10 @@ import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.InvalidConfigurationException;
 import org.apache.kafka.common.test.ClusterInstance;
 import org.apache.kafka.common.test.api.ClusterConfigProperty;
-import org.apache.kafka.common.test.api.ClusterFeature;
 import org.apache.kafka.common.test.api.ClusterTest;
 import org.apache.kafka.common.test.api.ClusterTestDefaults;
 import org.apache.kafka.common.test.api.Type;
 import org.apache.kafka.coordinator.group.GroupConfig;
-import org.apache.kafka.server.common.Feature;
 import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.Timeout;
@@ -344,15 +342,11 @@ public class ShareConsumerDeliveryTest extends ShareConsumerTestBase {
         }
     }
 
-    @ClusterTest(
-        features = {
-            @ClusterFeature(feature = Feature.SHARE_VERSION, version = 3)
-        }
-    )
-    public void testReleasedRecordIsRedeliveredAfterReleaseDelay() {
-        int releaseDelayMs = 6000;
+    @ClusterTest
+    public void testReleasedRecordIsRedeliveredAfterReleaseBackoff() {
+        int releaseBackoffMs = 6000;
         alterShareAutoOffsetReset("group1", "earliest");
-        alterShareReleaseDelayMs("group1", releaseDelayMs);
+        alterShareReleaseBackoffMs("group1", releaseBackoffMs);
         try (Producer<byte[], byte[]> producer = createProducer();
              ShareConsumer<byte[], byte[]> shareConsumer = createShareConsumer(
                  "group1",
@@ -368,7 +362,7 @@ public class ShareConsumerDeliveryTest extends ShareConsumerTestBase {
             assertEquals(1, records.count());
             assertEquals((short) 1, records.records(tp).get(0).deliveryCount().get());
 
-            // Release the record, it is available for redelivery only once the release delay expires.
+            // Release the record, it is available for redelivery only once the release backoff expires.
             shareConsumer.acknowledge(records.records(tp).get(0), AcknowledgeType.RELEASE);
             long releaseTimeMs = System.currentTimeMillis();
             Map<TopicIdPartition, Optional<KafkaException>> result = shareConsumer.commitSync();
@@ -384,20 +378,17 @@ public class ShareConsumerDeliveryTest extends ShareConsumerTestBase {
             records = waitedPoll(shareConsumer, 2500L, 1);
             assertEquals(1, records.count());
             assertEquals((short) 2, records.records(tp).get(0).deliveryCount().get());
-            assertTrue(System.currentTimeMillis() - releaseTimeMs >= releaseDelayMs,
-                "The released record was redelivered before the release delay expired");
+            assertTrue(System.currentTimeMillis() - releaseTimeMs >= releaseBackoffMs,
+                "The released record was redelivered before the release backoff expired");
         }
     }
 
-    @ClusterTest(
-        features = {
-            @ClusterFeature(feature = Feature.SHARE_VERSION, version = 2)
-        }
-    )
-    public void testReleaseDelayConfigRequiresShareVersion3() {
+    @ClusterTest
+    public void testReleaseBackoffAboveBrokerMaximumIsRejected() {
+        // The default of the broker's maximum release backoff, group.share.max.release.backoff.ms, is 60000.
         ConfigResource configResource = new ConfigResource(ConfigResource.Type.GROUP, "group1");
         Map<ConfigResource, Collection<AlterConfigOp>> alterEntries = Map.of(configResource, List.of(new AlterConfigOp(
-            new ConfigEntry(GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG, "1000"), AlterConfigOp.OpType.SET)));
+            new ConfigEntry(GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "60001"), AlterConfigOp.OpType.SET)));
         try (Admin adminClient = createAdminClient()) {
             ExecutionException e = assertThrows(ExecutionException.class, () ->
                 adminClient.incrementalAlterConfigs(alterEntries).all().get());

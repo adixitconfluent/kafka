@@ -52,6 +52,7 @@ import org.apache.kafka.common.requests.ShareRequestMetadata;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.internals.ImplicitLinkedHashCollection;
 import org.apache.kafka.coordinator.group.GroupConfigManager;
+import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig;
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfigProvider;
 import org.apache.kafka.server.common.ShareVersion;
 import org.apache.kafka.server.purgatory.DelayedOperationKey;
@@ -3366,7 +3367,6 @@ public class SharePartitionManagerTest {
         private BrokerTopicStats brokerTopicStats;
         private Supplier<Boolean> shareGroupDlqEnableSupplier = () -> false;
         private ShareGroupDLQManager shareGroupDLQManager = new NoOpShareGroupDLQManager();
-        private int defaultReleaseDelayMs = 0;
 
         private SharePartitionManagerBuilder withReplicaManager(ReplicaManager replicaManager) {
             this.replicaManager = replicaManager;
@@ -3413,11 +3413,6 @@ public class SharePartitionManagerTest {
             return this;
         }
 
-        private SharePartitionManagerBuilder withDefaultReleaseDelayMs(int defaultReleaseDelayMs) {
-            this.defaultReleaseDelayMs = defaultReleaseDelayMs;
-            return this;
-        }
-
         public static SharePartitionManagerBuilder builder() {
             return new SharePartitionManagerBuilder();
         }
@@ -3434,15 +3429,14 @@ public class SharePartitionManagerTest {
                 timer,
                 MAX_DELIVERY_COUNT,
                 MAX_IN_FLIGHT_MESSAGES,
-                defaultReleaseDelayMs,
+                ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT,
                 REMOTE_FETCH_MAX_WAIT_MS,
                 persister,
                 new ShareGroupConfigProvider(mock(GroupConfigManager.class)),
                 shareGroupMetrics,
                 brokerTopicStats,
                 shareGroupDlqEnableSupplier,
-                shareGroupDLQManager,
-                () -> true
+                shareGroupDLQManager
             );
         }
     }

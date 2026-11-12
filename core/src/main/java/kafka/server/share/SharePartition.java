@@ -39,6 +39,7 @@ import org.apache.kafka.common.record.internal.Record;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.utils.internals.ExponentialBackoff;
 import org.apache.kafka.coordinator.group.ShareGroupAutoOffsetResetStrategy;
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfigProvider;
 import org.apache.kafka.server.share.PartitionMetadataProvider;
@@ -111,6 +112,18 @@ public class SharePartition implements AutoCloseable {
      * Minimum number of records to deliver when throttling
      */
     private static final int MINIMUM_THROTTLE_RECORDS_DELIVERY_LIMIT = 2;
+
+    /**
+     * The factor by which the release backoff grows with each delivery attempt, when the share group
+     * enables exponential backoff. It is the same as for the retry backoff of clients.
+     */
+    private static final int RELEASE_BACKOFF_MULTIPLIER = 2;
+
+    /**
+     * The jitter of the release backoff, when the share group enables exponential backoff. It is the
+     * same as for the retry backoff of clients.
+     */
+    private static final double RELEASE_BACKOFF_JITTER = 0.2;
 
     /**
      * empty member id used to indicate when a record is not acquired by any member.
@@ -223,10 +236,11 @@ public class SharePartition implements AutoCloseable {
 
     /**
      * This is the default value which is used unless the group has a configuration which overrides it.
-     * The release delay is the duration for which a record stays unavailable for redelivery after it is
-     * made available again by a release, an acquisition lock timeout or a consumer disconnect.
+     * The maximum release backoff is the longest time for which a record stays unavailable for redelivery,
+     * after it is made available again by a release, an acquisition lock timeout or a consumer disconnect,
+     * when the share group enables exponential backoff. The default is the broker's upper bound for it.
      */
-    private final int defaultReleaseDelayMs;
+    private final int defaultReleaseBackoffMaxMs;
 
     /**
      * The find next fetch offset is used to indicate if the next fetch offset should be recomputed.
@@ -360,11 +374,6 @@ public class SharePartition implements AutoCloseable {
      */
     private final ShareGroupDLQManager shareGroupDLQManager;
 
-    /**
-     * Supplier to toggle the redelivery delay support.
-     */
-    private final Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier;
-
     @SuppressWarnings("ParameterNumber")
     SharePartition(
         String groupId,
@@ -373,7 +382,7 @@ public class SharePartition implements AutoCloseable {
         int defaultMaxInFlightRecords,
         int defaultMaxDeliveryCount,
         int defaultRecordLockDurationMs,
-        int defaultReleaseDelayMs,
+        int defaultReleaseBackoffMaxMs,
         Timer timer,
         Time time,
         Persister persister,
@@ -382,13 +391,12 @@ public class SharePartition implements AutoCloseable {
         ShareGroupConfigProvider configProvider,
         SharePartitionListener listener,
         Supplier<Boolean> shareGroupDlqEnableSupplier,
-        ShareGroupDLQManager shareGroupDLQManager,
-        Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
+        ShareGroupDLQManager shareGroupDLQManager
     ) {
         this(groupId, topicIdPartition, leaderEpoch, defaultMaxInFlightRecords, defaultMaxDeliveryCount, defaultRecordLockDurationMs,
-            defaultReleaseDelayMs, timer, time, persister, metadataProvider, delayedRequestNotifier, configProvider,
+            defaultReleaseBackoffMaxMs, timer, time, persister, metadataProvider, delayedRequestNotifier, configProvider,
             SharePartitionState.EMPTY, listener, new SharePartitionMetrics(groupId, topicIdPartition.topic(), topicIdPartition.partition()),
-            shareGroupDlqEnableSupplier, shareGroupDLQManager, shareGroupRedeliveryDelayEnableSupplier);
+            shareGroupDlqEnableSupplier, shareGroupDLQManager);
     }
 
     // Visible for testing
@@ -400,7 +408,7 @@ public class SharePartition implements AutoCloseable {
         int defaultMaxInFlightRecords,
         int defaultMaxDeliveryCount,
         int defaultRecordLockDurationMs,
-        int defaultReleaseDelayMs,
+        int defaultReleaseBackoffMaxMs,
         Timer timer,
         Time time,
         Persister persister,
@@ -411,8 +419,7 @@ public class SharePartition implements AutoCloseable {
         SharePartitionListener listener,
         SharePartitionMetrics sharePartitionMetrics,
         Supplier<Boolean> shareGroupDlqEnableSupplier,
-        ShareGroupDLQManager shareGroupDLQManager,
-        Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
+        ShareGroupDLQManager shareGroupDLQManager
     ) {
         this.groupId = groupId;
         this.topicIdPartition = topicIdPartition;
@@ -424,7 +431,7 @@ public class SharePartition implements AutoCloseable {
         this.findNextFetchOffset = false;
         this.fetchLock = new AtomicReference<>(null);
         this.defaultRecordLockDurationMs = defaultRecordLockDurationMs;
-        this.defaultReleaseDelayMs = defaultReleaseDelayMs;
+        this.defaultReleaseBackoffMaxMs = defaultReleaseBackoffMaxMs;
         this.timer = timer;
         this.time = time;
         this.loadStartTimeMs = time.hiResClockMs();
@@ -444,7 +451,6 @@ public class SharePartition implements AutoCloseable {
         this.deliveryCompleteCount = new AtomicInteger(0);
         this.shareGroupDlqEnableSupplier = shareGroupDlqEnableSupplier;
         this.shareGroupDLQManager = shareGroupDLQManager;
-        this.shareGroupRedeliveryDelayEnableSupplier = shareGroupRedeliveryDelayEnableSupplier;
     }
 
     /**
@@ -1708,6 +1714,7 @@ public class SharePartition implements AutoCloseable {
     private void registerGaugeMetrics() {
         sharePartitionMetrics.registerInFlightMessageCount(this::numInFlightRecords);
         sharePartitionMetrics.registerInFlightBatchCount(this.cachedState::size);
+        sharePartitionMetrics.registerRedeliveryDelayedRecordCount(this::numRedeliveryDelayedRecords);
     }
 
     private int numInFlightRecords() {
@@ -1723,6 +1730,46 @@ public class SharePartition implements AutoCloseable {
             lock.readLock().unlock();
         }
         return numRecords;
+    }
+
+    /**
+     * Returns the number of records which are waiting for their redelivery delay. A record waits for its
+     * delay only while it references one of the pending redelivery delay timer tasks, hence only the
+     * records within the offsets of those tasks are checked.
+     *
+     * @return The number of records which are waiting for their redelivery delay.
+     */
+    // Visible for testing
+    int numRedeliveryDelayedRecords() {
+        lock.readLock().lock();
+        try {
+            int numRecords = 0;
+            for (RedeliveryDelayTimerTask timerTask : pendingRedeliveryDelays) {
+                if (!isRedeliveryDelayed(timerTask)) {
+                    continue;
+                }
+                Map.Entry<Long, InFlightBatch> floorEntry = cachedState.floorEntry(timerTask.firstOffset());
+                long fromKey = floorEntry != null ? floorEntry.getKey() : timerTask.firstOffset();
+                for (InFlightBatch inFlightBatch : cachedState.subMap(fromKey, true, timerTask.lastOffset(), true).values()) {
+                    if (inFlightBatch.offsetState() == null) {
+                        // The timer task of a batch covers the complete batch.
+                        if (inFlightBatch.batchRedeliveryDelayTask() == timerTask && inFlightBatch.batchState() == RecordState.AVAILABLE) {
+                            numRecords += (int) (inFlightBatch.lastOffset() - inFlightBatch.firstOffset() + 1);
+                        }
+                        continue;
+                    }
+                    for (InFlightState offsetState : inFlightBatch.offsetState().subMap(timerTask.firstOffset(), true,
+                            timerTask.lastOffset(), true).values()) {
+                        if (offsetState.redeliveryDelayTask() == timerTask && offsetState.state() == RecordState.AVAILABLE) {
+                            numRecords++;
+                        }
+                    }
+                }
+            }
+            return numRecords;
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     private boolean stateNotActive() {
@@ -3286,8 +3333,8 @@ public class SharePartition implements AutoCloseable {
     /**
      * Apply the redelivery delay to the records which are made available again by a release, an acquisition
      * lock timeout or a consumer disconnect. The records are not acquirable until the delay expires. Contiguous
-     * records with the same delivery count share a single timer task. If no delay applies, the records are
-     * available for redelivery immediately.
+     * records with the same delivery count share a single timer task, hence the same delay, including its jitter.
+     * If no delay applies, the records are available for redelivery immediately.
      * <p>
      * The method must be called while holding the write lock.
      *
@@ -3763,26 +3810,30 @@ public class SharePartition implements AutoCloseable {
     }
 
     /**
-     * Returns the effective release delay for this share partition, using the per-group dynamic config
-     * if available, otherwise the broker default. The delay is 0 if the redelivery delay is not supported.
-     */
-    int releaseDelayMs() {
-        if (!shareGroupRedeliveryDelayEnableSupplier.get()) {
-            return 0;
-        }
-        return configProvider.releaseDelayMsOrDefault(groupId, defaultReleaseDelayMs);
-    }
-
-    /**
      * Returns the delay before records become available for redelivery after their delivery attempt
-     * with the given delivery count has ended.
+     * with the given delivery count has ended. By default, the delay is the release backoff of the share
+     * group, without jitter. If the share group enables exponential backoff, the delay doubles with each
+     * delivery attempt up to the maximum release backoff, with random jitter, as for the retry backoff of
+     * clients. If the release backoff is at least the maximum, every delay is the maximum, without jitter.
+     * The group configurations are within the broker's upper bound, as they are evaluated by the group
+     * config manager.
      *
      * @param deliveryCount The delivery count of the delivery attempt which has ended.
      *
      * @return The redelivery delay in milliseconds.
      */
-    private long redeliveryDelayMs(int deliveryCount) {
-        return releaseDelayMs();
+    // Visible for testing
+    long redeliveryDelayMs(int deliveryCount) {
+        int releaseBackoffMs = configProvider.releaseBackoffMs(groupId);
+        if (releaseBackoffMs <= 0) {
+            return 0;
+        }
+        if (!configProvider.isReleaseBackoffExponentialEnabled(groupId)) {
+            return releaseBackoffMs;
+        }
+        int releaseBackoffMaxMs = configProvider.releaseBackoffMaxMsOrDefault(groupId, defaultReleaseBackoffMaxMs);
+        return new ExponentialBackoff(releaseBackoffMs, RELEASE_BACKOFF_MULTIPLIER, releaseBackoffMaxMs, RELEASE_BACKOFF_JITTER)
+            .backoff(Math.max(deliveryCount - 1, 0));
     }
 
     /**

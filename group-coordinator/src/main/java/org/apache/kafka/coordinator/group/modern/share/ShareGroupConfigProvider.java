@@ -76,16 +76,42 @@ public class ShareGroupConfigProvider {
     }
 
     /**
-     * The method is used to get the release delay for the group. If the group config is present,
-     * then the release delay is returned. Otherwise, the default value is returned.
+     * The method is used to get the release backoff for the group. If the group config is present,
+     * then the value from the group config is used. Otherwise, the default value is used.
      *
-     * @param groupId The group id for which the release delay is to be fetched.
-     * @param defaultValue The default value to be returned if the group config is not present.
-     * @return The release delay in milliseconds for the group.
+     * @param groupId The group id for which the release backoff is to be fetched.
+     * @return The release backoff in milliseconds for the group.
      */
-    public int releaseDelayMsOrDefault(String groupId, int defaultValue) {
+    public int releaseBackoffMs(String groupId) {
         return manager.groupConfig(groupId)
-            .flatMap(GroupConfig::shareReleaseDelayMs)
+            .flatMap(GroupConfig::shareReleaseBackoffMs)
+            .orElse(GroupConfig.SHARE_RELEASE_BACKOFF_MS_DEFAULT);
+    }
+
+    /**
+     * The method is used to check if the release backoff grows exponentially for the group. If the group
+     * config is present, then the value from the group config is used. Otherwise, the default value is used.
+     *
+     * @param groupId The group id for which the exponential release backoff is to be checked.
+     * @return true if the release backoff grows exponentially for the group, false otherwise.
+     */
+    public boolean isReleaseBackoffExponentialEnabled(String groupId) {
+        return manager.groupConfig(groupId)
+            .flatMap(GroupConfig::shareReleaseBackoffExponentialEnable)
+            .orElse(GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_DEFAULT);
+    }
+
+    /**
+     * The method is used to get the maximum release backoff for the group. If the group config is present,
+     * then the maximum release backoff is returned. Otherwise, the default value is returned.
+     *
+     * @param groupId The group id for which the maximum release backoff is to be fetched.
+     * @param defaultValue The default value to be returned if the group config is not present.
+     * @return The maximum release backoff in milliseconds for the group.
+     */
+    public int releaseBackoffMaxMsOrDefault(String groupId, int defaultValue) {
+        return manager.groupConfig(groupId)
+            .flatMap(GroupConfig::shareReleaseBackoffMaxMs)
             .orElse(defaultValue);
     }
 

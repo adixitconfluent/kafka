@@ -58,11 +58,10 @@ import static org.apache.kafka.coordinator.group.GroupCoordinatorConfig.STREAMS_
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MAX_DELIVERY_COUNT_LIMIT_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MAX_PARTITION_MAX_RECORD_LOCKS_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_DEFAULT;
-import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_DELAY_MS_DEFAULT;
+import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MIN_DELIVERY_COUNT_LIMIT_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MIN_PARTITION_MAX_RECORD_LOCKS_DEFAULT;
 import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MIN_RECORD_LOCK_DURATION_MS_DEFAULT;
-import static org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig.SHARE_GROUP_MIN_RELEASE_DELAY_MS_DEFAULT;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -107,7 +106,11 @@ public class GroupConfigTest {
                 assertPropertyInvalid(name, "not_a_number", "-0.1", "1.2");
             } else if (GroupConfig.SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG.equals(name)) {
                 assertPropertyInvalid(name, "not_a_number", "-0.1", "1.2");
-            } else if (GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG.equals(name)) {
+            } else if (GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG.equals(name)) {
+                assertPropertyInvalid(name, "not_a_number", "-1", "1.2");
+            } else if (GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG.equals(name)) {
+                assertPropertyInvalid(name, "not_a_boolean", "1");
+            } else if (GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG.equals(name)) {
                 assertPropertyInvalid(name, "not_a_number", "-1", "1.2");
             } else if (GroupConfig.SHARE_AUTO_OFFSET_RESET_CONFIG.equals(name)) {
                 assertPropertyInvalid(name, "hello", "1.0");
@@ -476,8 +479,10 @@ public class GroupConfigTest {
                 "share.delivery.count.limit must be in the range 2 to 10 inclusive."),
             Arguments.of(GroupConfig.SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG, "11000",
                 "share.partition.max.record.locks must be in the range 100 to 10000 inclusive."),
-            Arguments.of(GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG, "70000",
-                "share.release.delay.ms must be in the range 0 to 60000 inclusive."),
+            Arguments.of(GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "70000",
+                "share.release.backoff.ms must be less than or equal to 60000"),
+            Arguments.of(GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, "70000",
+                "share.release.backoff.max.ms must be less than or equal to 60000"),
             Arguments.of(GroupConfig.SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG, "500",
                 "share.assignment.interval.ms must be in the range 1000 to 15000 inclusive."),
             Arguments.of(GroupConfig.SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG, "20000",
@@ -587,7 +592,9 @@ public class GroupConfigTest {
         assertEquals(Optional.empty(), config.shareRecordLockDurationMs());
         assertEquals(Optional.empty(), config.shareDeliveryCountLimit());
         assertEquals(Optional.empty(), config.sharePartitionMaxRecordLocks());
-        assertEquals(Optional.empty(), config.shareReleaseDelayMs());
+        assertEquals(Optional.empty(), config.shareReleaseBackoffMs());
+        assertEquals(Optional.empty(), config.shareReleaseBackoffExponentialEnable());
+        assertEquals(Optional.empty(), config.shareReleaseBackoffMaxMs());
         assertEquals(Optional.empty(), config.shareAutoOffsetReset());
         assertEquals(Optional.empty(), config.shareAssignmentIntervalMs());
         assertEquals(Optional.empty(), config.shareAssignorOffloadEnable());
@@ -622,7 +629,9 @@ public class GroupConfigTest {
         props.put(GroupConfig.SHARE_RECORD_LOCK_DURATION_MS_CONFIG, "20000");
         props.put(GroupConfig.SHARE_DELIVERY_COUNT_LIMIT_CONFIG, "5");
         props.put(GroupConfig.SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG, "1000");
-        props.put(GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG, "5000");
+        props.put(GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "5000");
+        props.put(GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG, "true");
+        props.put(GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, "30000");
         props.put(GroupConfig.SHARE_AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(GroupConfig.SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG, "2500");
         props.put(GroupConfig.SHARE_ASSIGNOR_OFFLOAD_ENABLE_CONFIG, "true");
@@ -653,7 +662,9 @@ public class GroupConfigTest {
         assertEquals(Optional.of(20000), config.shareRecordLockDurationMs());
         assertEquals(Optional.of(5), config.shareDeliveryCountLimit());
         assertEquals(Optional.of(1000), config.sharePartitionMaxRecordLocks());
-        assertEquals(Optional.of(5000), config.shareReleaseDelayMs());
+        assertEquals(Optional.of(5000), config.shareReleaseBackoffMs());
+        assertEquals(Optional.of(true), config.shareReleaseBackoffExponentialEnable());
+        assertEquals(Optional.of(30000), config.shareReleaseBackoffMaxMs());
         assertEquals(Optional.of(ShareGroupAutoOffsetResetStrategy.EARLIEST), config.shareAutoOffsetReset());
         assertEquals(Optional.of(2500), config.shareAssignmentIntervalMs());
         assertEquals(Optional.of(true), config.shareAssignorOffloadEnable());
@@ -787,11 +798,6 @@ public class GroupConfigTest {
                 5000, SHARE_GROUP_MAX_PARTITION_MAX_RECORD_LOCKS_DEFAULT
             ),
             Arguments.of(
-                GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG,
-                -1, SHARE_GROUP_MIN_RELEASE_DELAY_MS_DEFAULT,
-                70000, SHARE_GROUP_MAX_RELEASE_DELAY_MS_DEFAULT
-            ),
-            Arguments.of(
                 GroupConfig.SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG,
                 0, /* SHARE_GROUP_MIN_ASSIGNMENT_INTERVAL_MS_CONFIG = */ 500,
                 20000, SHARE_GROUP_MAX_ASSIGNMENT_INTERVAL_MS_DEFAULT
@@ -821,6 +827,14 @@ public class GroupConfigTest {
      */
     private static Stream<Arguments> maxBoundedConfigs() {
         return Stream.of(
+            Arguments.of(
+                GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG,
+                70000, SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT
+            ),
+            Arguments.of(
+                GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG,
+                70000, SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT
+            ),
             Arguments.of(
                 GroupConfig.STREAMS_NUM_STANDBY_REPLICAS_CONFIG,
                 5, STREAMS_GROUP_MAX_STANDBY_REPLICAS_DEFAULT
@@ -908,6 +922,57 @@ public class GroupConfigTest {
         Properties result = GroupConfig.evaluate(props, "test-group",
             GroupCoordinatorConfig.fromProps(new HashMap<>()), ShareGroupConfig.fromProps(new HashMap<>()));
         assertEquals(expectedMin, result.get(key));
+    }
+
+    @Test
+    public void testReleaseBackoffValidation() {
+        ShareGroupConfig shareGroupConfig = ShareGroupConfig.fromProps(Map.of(
+            ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG, 10000));
+
+        // The release backoff may exceed the maximum release backoff, which makes every delay the maximum
+        // when exponential backoff is enabled.
+        assertDoesNotThrow(() -> GroupConfig.validate(Map.of(
+            GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "10000",
+            GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG, "true",
+            GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, "5000"
+        ), createGroupCoordinatorConfig(), shareGroupConfig));
+
+        // Both values are bounded by the broker's maximum release backoff.
+        assertThrows(InvalidConfigurationException.class, () -> GroupConfig.validate(Map.of(
+            GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "10001"), createGroupCoordinatorConfig(), shareGroupConfig));
+        assertThrows(InvalidConfigurationException.class, () -> GroupConfig.validate(Map.of(
+            GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, "10001"), createGroupCoordinatorConfig(), shareGroupConfig));
+
+        // A broker maximum of 0 turns off the delay, hence a share group can only set 0.
+        ShareGroupConfig delayOffShareGroupConfig = ShareGroupConfig.fromProps(Map.of(
+            ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG, 0));
+        assertDoesNotThrow(() -> GroupConfig.validate(Map.of(
+            GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "0"), createGroupCoordinatorConfig(), delayOffShareGroupConfig));
+        assertThrows(InvalidConfigurationException.class, () -> GroupConfig.validate(Map.of(
+            GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, "1"), createGroupCoordinatorConfig(), delayOffShareGroupConfig));
+    }
+
+    @Test
+    public void testEvaluateReleaseBackoffWhenBrokerTurnsOffDelay() {
+        // The group values are capped to 0 if the broker maximum is lowered to 0 after they are set.
+        Properties props = new Properties();
+        props.put(GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, 5000);
+        props.put(GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG, true);
+        props.put(GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, 20000);
+        Properties result = GroupConfig.evaluate(props, "test-group", GroupCoordinatorConfig.fromProps(new HashMap<>()),
+            ShareGroupConfig.fromProps(Map.of(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG, 0)));
+        assertEquals(0, result.get(GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG));
+        assertEquals(true, result.get(GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG));
+        assertEquals(0, result.get(GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG));
+    }
+
+    @Test
+    public void testReleaseBackoffSynonyms() {
+        // Only the maximum release backoff takes its default from the broker, as its upper bound.
+        assertEquals(Optional.empty(), GroupConfig.brokerSynonym(GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG));
+        assertEquals(Optional.empty(), GroupConfig.brokerSynonym(GroupConfig.SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG));
+        assertEquals(Optional.of(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG),
+            GroupConfig.brokerSynonym(GroupConfig.SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG));
     }
 
     @Test

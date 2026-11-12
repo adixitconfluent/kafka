@@ -549,8 +549,8 @@ public abstract class ShareConsumerTestBase {
         alterShareGroupConfig(groupId, GroupConfig.SHARE_RECORD_LOCK_DURATION_MS_CONFIG, Integer.toString(newValue));
     }
 
-    protected void alterShareReleaseDelayMs(String groupId, int newValue) {
-        alterShareGroupConfig(groupId, GroupConfig.SHARE_RELEASE_DELAY_MS_CONFIG, Integer.toString(newValue));
+    protected void alterShareReleaseBackoffMs(String groupId, int newValue) {
+        alterShareGroupConfig(groupId, GroupConfig.SHARE_RELEASE_BACKOFF_MS_CONFIG, Integer.toString(newValue));
     }
 
     /**

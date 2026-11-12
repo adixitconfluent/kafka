@@ -41,9 +41,7 @@ public class ShareGroupConfigTest {
         configs.put(ShareGroupConfig.SHARE_GROUP_RECORD_LOCK_DURATION_MS_CONFIG, 30000);
         configs.put(ShareGroupConfig.SHARE_GROUP_MIN_RECORD_LOCK_DURATION_MS_CONFIG, 15000);
         configs.put(ShareGroupConfig.SHARE_GROUP_MAX_RECORD_LOCK_DURATION_MS_CONFIG, 60000);
-        configs.put(ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_CONFIG, 5000);
-        configs.put(ShareGroupConfig.SHARE_GROUP_MIN_RELEASE_DELAY_MS_CONFIG, 1000);
-        configs.put(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_DELAY_MS_CONFIG, 120000);
+        configs.put(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG, 120000);
         configs.put(ShareGroupConfig.SHARE_FETCH_PURGATORY_PURGE_INTERVAL_REQUESTS_CONFIG, 1000);
         configs.put(ShareGroupConfig.SHARE_GROUP_MAX_SHARE_SESSIONS_CONFIG, 1000);
 
@@ -54,11 +52,17 @@ public class ShareGroupConfigTest {
         assertEquals(30000, config.shareGroupRecordLockDurationMs());
         assertEquals(15000, config.shareGroupMinRecordLockDurationMs());
         assertEquals(60000, config.shareGroupMaxRecordLockDurationMs());
-        assertEquals(5000, config.shareGroupReleaseDelayMs());
-        assertEquals(1000, config.shareGroupMinReleaseDelayMs());
-        assertEquals(120000, config.shareGroupMaxReleaseDelayMs());
+        assertEquals(120000, config.shareGroupMaxReleaseBackoffMs());
         assertEquals(1000, config.shareFetchPurgatoryPurgeIntervalRequests());
         assertEquals(1000, config.shareGroupMaxShareSessions());
+    }
+
+    @Test
+    public void testMaxReleaseBackoff() {
+        assertEquals(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT, createConfig(new HashMap<>()).shareGroupMaxReleaseBackoffMs());
+        assertEquals(60000, ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT);
+        // A value of 0 is valid, and turns off the release backoff for all share groups.
+        assertEquals(0, createConfig(Map.of(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG, 0)).shareGroupMaxReleaseBackoffMs());
     }
 
     @Test
@@ -132,23 +136,15 @@ public class ShareGroupConfigTest {
             assertThrows(ConfigException.class, () -> createConfig(configs)).getMessage());
 
         configs.clear();
-        // test for when SHARE_GROUP_RELEASE_DELAY_MS_CONFIG is less than SHARE_GROUP_MIN_RELEASE_DELAY_MS_CONFIG
-        configs.put(ShareGroupConfig.SHARE_GROUP_MIN_RELEASE_DELAY_MS_CONFIG, 1000);
-        configs.put(ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_CONFIG, 500);
-        assertEquals("group.share.release.delay.ms must be greater than or equal to group.share.min.release.delay.ms",
-            assertThrows(IllegalArgumentException.class, () -> createConfig(configs)).getMessage());
+        // test for when SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG is negative
+        configs.put(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG, -1);
+        assertEquals("Invalid value -1 for configuration group.share.max.release.backoff.ms: Value must be at least 0",
+            assertThrows(ConfigException.class, () -> createConfig(configs)).getMessage());
 
         configs.clear();
-        // test for when SHARE_GROUP_RELEASE_DELAY_MS_CONFIG is greater than SHARE_GROUP_MAX_RELEASE_DELAY_MS_CONFIG
-        configs.put(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_DELAY_MS_CONFIG, 10000);
-        configs.put(ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_CONFIG, 20000);
-        assertEquals("group.share.max.release.delay.ms must be greater than or equal to group.share.release.delay.ms",
-            assertThrows(IllegalArgumentException.class, () -> createConfig(configs)).getMessage());
-
-        configs.clear();
-        // test for when SHARE_GROUP_RELEASE_DELAY_MS_CONFIG is out of bounds
-        configs.put(ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_CONFIG, -1);
-        assertEquals("Invalid value -1 for configuration group.share.release.delay.ms: Value must be at least 0",
+        // test for when SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG is more than an hour
+        configs.put(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG, 3600001);
+        assertEquals("Invalid value 3600001 for configuration group.share.max.release.backoff.ms: Value must be no more than 3600000",
             assertThrows(ConfigException.class, () -> createConfig(configs)).getMessage());
 
         configs.clear();

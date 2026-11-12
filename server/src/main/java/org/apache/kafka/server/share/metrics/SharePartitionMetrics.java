@@ -35,6 +35,7 @@ public class SharePartitionMetrics implements AutoCloseable {
 
     public static final String IN_FLIGHT_MESSAGE_COUNT = "InFlightMessageCount";
     public static final String IN_FLIGHT_BATCH_COUNT = "InFlightBatchCount";
+    public static final String REDELIVERY_DELAYED_RECORD_COUNT = "RedeliveryDelayedRecordCount";
 
     private static final String ACQUISITION_LOCK_TIMEOUT_PER_SEC = "AcquisitionLockTimeoutPerSec";
     private static final String IN_FLIGHT_BATCH_MESSAGE_COUNT = "InFlightBatchMessageCount";
@@ -117,6 +118,19 @@ public class SharePartitionMetrics implements AutoCloseable {
         );
     }
 
+    /**
+     * Register a gauge for the number of records which are waiting for their redelivery delay.
+     *
+     * @param recordCountSupplier The supplier for the number of records waiting for their redelivery delay.
+     */
+    public void registerRedeliveryDelayedRecordCount(Supplier<Integer> recordCountSupplier) {
+        metricsGroup.newGauge(
+            REDELIVERY_DELAYED_RECORD_COUNT,
+            recordCountSupplier,
+            this.tags
+        );
+    }
+
     public void recordAcquisitionLockTimeoutPerSec(long count) {
         acquisitionLockTimeoutPerSec.mark(count);
     }
@@ -158,6 +172,7 @@ public class SharePartitionMetrics implements AutoCloseable {
         List.of(ACQUISITION_LOCK_TIMEOUT_PER_SEC,
             IN_FLIGHT_MESSAGE_COUNT,
             IN_FLIGHT_BATCH_COUNT,
+            REDELIVERY_DELAYED_RECORD_COUNT,
             IN_FLIGHT_BATCH_MESSAGE_COUNT,
             FETCH_LOCK_TIME_MS,
             FETCH_LOCK_RATIO

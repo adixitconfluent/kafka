@@ -70,7 +70,22 @@ public final class GroupConfig extends AbstractConfig {
 
     public static final String SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG = "share.partition.max.record.locks";
 
-    public static final String SHARE_RELEASE_DELAY_MS_CONFIG = "share.release.delay.ms";
+    public static final String SHARE_RELEASE_BACKOFF_MS_CONFIG = "share.release.backoff.ms";
+    public static final int SHARE_RELEASE_BACKOFF_MS_DEFAULT = 0;
+    public static final String SHARE_RELEASE_BACKOFF_MS_DOC = "The time in milliseconds a record waits before its next delivery attempt, " +
+        "after a share consumer releases it, its acquisition lock times out, or the share consumer holding it disconnects without " +
+        "closing. A value of 0 makes the record available immediately. A record which reaches the delivery count limit does not wait.";
+
+    public static final String SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG = "share.release.backoff.exponential.enable";
+    public static final boolean SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_DEFAULT = false;
+    public static final String SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_DOC = "Whether the time a record waits before its next delivery " +
+        "attempt doubles with each further attempt, up to share.release.backoff.max.ms, with random jitter of up to 20%. " +
+        "If false, every wait is share.release.backoff.ms, without jitter.";
+
+    public static final String SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG = "share.release.backoff.max.ms";
+    public static final String SHARE_RELEASE_BACKOFF_MAX_MS_DOC = "The longest time in milliseconds a record waits before its next delivery " +
+        "attempt when exponential backoff is enabled. If share.release.backoff.ms is greater than or equal to this value, every wait " +
+        "is this value, without jitter. It has no effect when exponential backoff is disabled.";
 
     public static final String SHARE_AUTO_OFFSET_RESET_CONFIG = "share.auto.offset.reset";
     public static final String SHARE_AUTO_OFFSET_RESET_DEFAULT = ShareGroupAutoOffsetResetStrategy.LATEST.name();
@@ -148,7 +163,11 @@ public final class GroupConfig extends AbstractConfig {
 
     private final Optional<Integer> sharePartitionMaxRecordLocks;
 
-    private final Optional<Integer> shareReleaseDelayMs;
+    private final Optional<Integer> shareReleaseBackoffMs;
+
+    private final Optional<Boolean> shareReleaseBackoffExponentialEnable;
+
+    private final Optional<Integer> shareReleaseBackoffMaxMs;
 
     private final Optional<ShareGroupAutoOffsetResetStrategy> shareAutoOffsetReset;
 
@@ -240,12 +259,23 @@ public final class GroupConfig extends AbstractConfig {
             atLeast(100),
             MEDIUM,
             ShareGroupConfig.SHARE_GROUP_PARTITION_MAX_RECORD_LOCKS_DOC)
-        .define(SHARE_RELEASE_DELAY_MS_CONFIG,
+        .define(SHARE_RELEASE_BACKOFF_MS_CONFIG,
             INT,
-            ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_DEFAULT,
+            SHARE_RELEASE_BACKOFF_MS_DEFAULT,
             atLeast(0),
             MEDIUM,
-            ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_DOC)
+            SHARE_RELEASE_BACKOFF_MS_DOC)
+        .define(SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG,
+            BOOLEAN,
+            SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_DEFAULT,
+            MEDIUM,
+            SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_DOC)
+        .define(SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG,
+            INT,
+            ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_DEFAULT,
+            atLeast(0),
+            MEDIUM,
+            SHARE_RELEASE_BACKOFF_MAX_MS_DOC)
         .define(SHARE_AUTO_OFFSET_RESET_CONFIG,
             STRING,
             SHARE_AUTO_OFFSET_RESET_DEFAULT,
@@ -368,7 +398,10 @@ public final class GroupConfig extends AbstractConfig {
         Map.entry(SHARE_RECORD_LOCK_DURATION_MS_CONFIG, Optional.of(ShareGroupConfig.SHARE_GROUP_RECORD_LOCK_DURATION_MS_CONFIG)),
         Map.entry(SHARE_DELIVERY_COUNT_LIMIT_CONFIG, Optional.of(ShareGroupConfig.SHARE_GROUP_DELIVERY_COUNT_LIMIT_CONFIG)),
         Map.entry(SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG, Optional.of(ShareGroupConfig.SHARE_GROUP_PARTITION_MAX_RECORD_LOCKS_CONFIG)),
-        Map.entry(SHARE_RELEASE_DELAY_MS_CONFIG, Optional.of(ShareGroupConfig.SHARE_GROUP_RELEASE_DELAY_MS_CONFIG)),
+        Map.entry(SHARE_RELEASE_BACKOFF_MS_CONFIG, Optional.empty()),
+        Map.entry(SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG, Optional.empty()),
+        // The default of the maximum release backoff is the broker's upper bound for it.
+        Map.entry(SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG, Optional.of(ShareGroupConfig.SHARE_GROUP_MAX_RELEASE_BACKOFF_MS_CONFIG)),
         Map.entry(SHARE_AUTO_OFFSET_RESET_CONFIG, Optional.empty()),
         Map.entry(SHARE_ISOLATION_LEVEL_CONFIG, Optional.empty()),
         Map.entry(SHARE_RENEW_ACKNOWLEDGE_ENABLE_CONFIG, Optional.empty()),
@@ -424,7 +457,9 @@ public final class GroupConfig extends AbstractConfig {
         this.shareRecordLockDurationMs = optionalInt(SHARE_RECORD_LOCK_DURATION_MS_CONFIG);
         this.shareDeliveryCountLimit = optionalInt(SHARE_DELIVERY_COUNT_LIMIT_CONFIG);
         this.sharePartitionMaxRecordLocks = optionalInt(SHARE_PARTITION_MAX_RECORD_LOCKS_CONFIG);
-        this.shareReleaseDelayMs = optionalInt(SHARE_RELEASE_DELAY_MS_CONFIG);
+        this.shareReleaseBackoffMs = optionalInt(SHARE_RELEASE_BACKOFF_MS_CONFIG);
+        this.shareReleaseBackoffExponentialEnable = optionalBoolean(SHARE_RELEASE_BACKOFF_EXPONENTIAL_ENABLE_CONFIG);
+        this.shareReleaseBackoffMaxMs = optionalInt(SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG);
         this.shareAutoOffsetReset = optionalString(SHARE_AUTO_OFFSET_RESET_CONFIG)
             .map(ShareGroupAutoOffsetResetStrategy::fromString);
         this.shareAssignmentIntervalMs = optionalInt(SHARE_ASSIGNMENT_INTERVAL_MS_CONFIG);
@@ -598,11 +633,15 @@ public final class GroupConfig extends AbstractConfig {
             shareGroupConfig.shareGroupMinPartitionMaxRecordLocks(),
             shareGroupConfig.shareGroupMaxPartitionMaxRecordLocks()
         );
-        validateIntRange(
+        validateIntMax(
             parsed,
-            SHARE_RELEASE_DELAY_MS_CONFIG,
-            shareGroupConfig.shareGroupMinReleaseDelayMs(),
-            shareGroupConfig.shareGroupMaxReleaseDelayMs()
+            SHARE_RELEASE_BACKOFF_MS_CONFIG,
+            shareGroupConfig.shareGroupMaxReleaseBackoffMs()
+        );
+        validateIntMax(
+            parsed,
+            SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG,
+            shareGroupConfig.shareGroupMaxReleaseBackoffMs()
         );
         validateIntRange(
             parsed,
@@ -875,12 +914,17 @@ public final class GroupConfig extends AbstractConfig {
             shareGroupConfig.shareGroupMinPartitionMaxRecordLocks(),
             shareGroupConfig.shareGroupMaxPartitionMaxRecordLocks()
         );
-        clampToRange(
+        clampToMax(
             evaluatedGroupConfig,
             groupId,
-            SHARE_RELEASE_DELAY_MS_CONFIG,
-            shareGroupConfig.shareGroupMinReleaseDelayMs(),
-            shareGroupConfig.shareGroupMaxReleaseDelayMs()
+            SHARE_RELEASE_BACKOFF_MS_CONFIG,
+            shareGroupConfig.shareGroupMaxReleaseBackoffMs()
+        );
+        clampToMax(
+            evaluatedGroupConfig,
+            groupId,
+            SHARE_RELEASE_BACKOFF_MAX_MS_CONFIG,
+            shareGroupConfig.shareGroupMaxReleaseBackoffMs()
         );
         clampToRange(
             evaluatedGroupConfig,
@@ -1173,10 +1217,24 @@ public final class GroupConfig extends AbstractConfig {
     }
 
     /**
-     * The share group release delay milliseconds.
+     * The share group release backoff milliseconds.
      */
-    public Optional<Integer> shareReleaseDelayMs() {
-        return shareReleaseDelayMs;
+    public Optional<Integer> shareReleaseBackoffMs() {
+        return shareReleaseBackoffMs;
+    }
+
+    /**
+     * Whether the share group release backoff grows exponentially.
+     */
+    public Optional<Boolean> shareReleaseBackoffExponentialEnable() {
+        return shareReleaseBackoffExponentialEnable;
+    }
+
+    /**
+     * The share group maximum release backoff milliseconds.
+     */
+    public Optional<Integer> shareReleaseBackoffMaxMs() {
+        return shareReleaseBackoffMaxMs;
     }
 
     /**

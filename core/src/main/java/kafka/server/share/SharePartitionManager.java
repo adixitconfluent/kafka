@@ -149,11 +149,12 @@ public class SharePartitionManager implements AutoCloseable {
     private final int maxDeliveryCount;
 
     /**
-     * The default release delay is the time in milliseconds for which a record stays unavailable for redelivery
-     * after it is released, its acquisition lock times out, or the consumer holding it disconnects.
+     * The default maximum release backoff is the longest time in milliseconds for which a record stays unavailable
+     * for redelivery, after it is released, its acquisition lock times out, or the consumer holding it disconnects,
+     * when the share group enables exponential backoff. It is the broker's upper bound for the release backoff.
      * This default value can be overridden by a group-specific configuration.
      */
-    private final int defaultReleaseDelayMs;
+    private final int defaultReleaseBackoffMaxMs;
     /**
      * The max wait time for a share fetch request having remote storage fetch.
      */
@@ -184,11 +185,6 @@ public class SharePartitionManager implements AutoCloseable {
      */
     private final ShareGroupDLQManager shareGroupDLQManager;
 
-    /**
-     * Supplier indicating whether the redelivery delay support is enabled.
-     */
-    private final Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier;
-
     @SuppressWarnings("ParameterNumber")
     public SharePartitionManager(
         ReplicaManager replicaManager,
@@ -200,15 +196,14 @@ public class SharePartitionManager implements AutoCloseable {
         int defaultRecordLockDurationMs,
         int maxDeliveryCount,
         int maxInFlightRecords,
-        int defaultReleaseDelayMs,
+        int defaultReleaseBackoffMaxMs,
         long remoteFetchMaxWaitMs,
         Persister persister,
         ShareGroupConfigProvider configProvider,
         ShareGroupMetrics shareGroupMetrics,
         BrokerTopicStats brokerTopicStats,
         Supplier<Boolean> shareGroupDlqEnableSupplier,
-        ShareGroupDLQManager shareGroupDLQManager,
-        Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
+        ShareGroupDLQManager shareGroupDLQManager
     ) {
         this(replicaManager,
             logReader,
@@ -220,15 +215,14 @@ public class SharePartitionManager implements AutoCloseable {
             defaultRecordLockDurationMs,
             maxDeliveryCount,
             maxInFlightRecords,
-            defaultReleaseDelayMs,
+            defaultReleaseBackoffMaxMs,
             remoteFetchMaxWaitMs,
             persister,
             configProvider,
             shareGroupMetrics,
             brokerTopicStats,
             shareGroupDlqEnableSupplier,
-            shareGroupDLQManager,
-            shareGroupRedeliveryDelayEnableSupplier
+            shareGroupDLQManager
         );
     }
 
@@ -244,15 +238,14 @@ public class SharePartitionManager implements AutoCloseable {
         int defaultRecordLockDurationMs,
         int maxDeliveryCount,
         int maxInFlightRecords,
-        int defaultReleaseDelayMs,
+        int defaultReleaseBackoffMaxMs,
         long remoteFetchMaxWaitMs,
         Persister persister,
         ShareGroupConfigProvider configProvider,
         ShareGroupMetrics shareGroupMetrics,
         BrokerTopicStats brokerTopicStats,
         Supplier<Boolean> shareGroupDlqEnableSupplier,
-        ShareGroupDLQManager shareGroupDLQManager,
-        Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
+        ShareGroupDLQManager shareGroupDLQManager
     ) {
         this(replicaManager,
             logReader,
@@ -266,15 +259,14 @@ public class SharePartitionManager implements AutoCloseable {
                 new SystemTimer("share-group-lock-timeout")),
             maxDeliveryCount,
             maxInFlightRecords,
-            defaultReleaseDelayMs,
+            defaultReleaseBackoffMaxMs,
             remoteFetchMaxWaitMs,
             persister,
             configProvider,
             shareGroupMetrics,
             brokerTopicStats,
             shareGroupDlqEnableSupplier,
-            shareGroupDLQManager,
-            shareGroupRedeliveryDelayEnableSupplier
+            shareGroupDLQManager
         );
     }
 
@@ -292,15 +284,14 @@ public class SharePartitionManager implements AutoCloseable {
             Timer timer,
             int maxDeliveryCount,
             int maxInFlightRecords,
-            int defaultReleaseDelayMs,
+            int defaultReleaseBackoffMaxMs,
             long remoteFetchMaxWaitMs,
             Persister persister,
             ShareGroupConfigProvider configProvider,
             ShareGroupMetrics shareGroupMetrics,
             BrokerTopicStats brokerTopicStats,
             Supplier<Boolean> shareGroupDlqEnableSupplier,
-            ShareGroupDLQManager shareGroupDLQManager,
-            Supplier<Boolean> shareGroupRedeliveryDelayEnableSupplier
+            ShareGroupDLQManager shareGroupDLQManager
     ) {
         this.replicaManager = replicaManager;
         this.logReader = logReader;
@@ -313,7 +304,7 @@ public class SharePartitionManager implements AutoCloseable {
         this.timer = timer;
         this.maxDeliveryCount = maxDeliveryCount;
         this.maxInFlightRecords = maxInFlightRecords;
-        this.defaultReleaseDelayMs = defaultReleaseDelayMs;
+        this.defaultReleaseBackoffMaxMs = defaultReleaseBackoffMaxMs;
         this.remoteFetchMaxWaitMs = remoteFetchMaxWaitMs;
         this.persister = persister;
         this.configProvider = configProvider;
@@ -322,7 +313,6 @@ public class SharePartitionManager implements AutoCloseable {
         this.cache.registerShareGroupListener(new ShareGroupListenerImpl());
         this.shareGroupDlqEnableSupplier = shareGroupDlqEnableSupplier;
         this.shareGroupDLQManager = shareGroupDLQManager;
-        this.shareGroupRedeliveryDelayEnableSupplier = shareGroupRedeliveryDelayEnableSupplier;
     }
 
     /**
@@ -826,7 +816,7 @@ public class SharePartitionManager implements AutoCloseable {
                             maxInFlightRecords,
                             maxDeliveryCount,
                             defaultRecordLockDurationMs,
-                            defaultReleaseDelayMs,
+                            defaultReleaseBackoffMaxMs,
                             timer,
                             time,
                             persister,
@@ -835,8 +825,7 @@ public class SharePartitionManager implements AutoCloseable {
                             configProvider,
                             listener,
                             shareGroupDlqEnableSupplier,
-                            shareGroupDLQManager,
-                            shareGroupRedeliveryDelayEnableSupplier
+                            shareGroupDLQManager
                     );
                 });
     }
